@@ -31,21 +31,25 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.0.275",
 ]
+temporal = [
+    "temporalio>=1.5.0",
+]
 
 [project.scripts]
 llmstxt-architect = "llmstxt_architect.cli:main"
+llmstxt-architect-worker = "llmstxt_architect.temporal.worker:main"
 
 [project.urls]
 "Homepage" = "https://github.com/rlancemartin/llmstxt_architect"
 
 [tool.black]
-line-length = 88
+line-length = 110
 
 [tool.isort]
 profile = "black"
 
 [tool.ruff]
-line-length = 88
+line-length = 110
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

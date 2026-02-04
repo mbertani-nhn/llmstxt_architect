@@ -5,7 +5,6 @@ Command-line interface for LLMsTxt Architect.
 import argparse
 import asyncio
 import sys
-from typing import List, Optional
 
 from llmstxt_architect.extractor import bs4_extractor, default_extractor
 from llmstxt_architect.main import generate_llms_txt
@@ -51,9 +50,7 @@ def parse_args() -> argparse.Namespace:
         help="LLM model name (default: claude-3-sonnet-20240229)",
     )
 
-    parser.add_argument(
-        "--llm-provider", default="anthropic", help="LLM provider (default: anthropic)"
-    )
+    parser.add_argument("--llm-provider", default="anthropic", help="LLM provider (default: anthropic)")
 
     parser.add_argument(
         "--project-dir",
@@ -95,6 +92,36 @@ def parse_args() -> argparse.Namespace:
         help="Content extractor to use (default: markdownify, bs4: BeautifulSoup)",
     )
 
+    parser.add_argument(
+        "--max-concurrent-crawls",
+        type=int,
+        default=3,
+        help="Maximum number of concurrent root URL crawls (default: 3)",
+    )
+
+    parser.add_argument(
+        "--max-concurrent-summaries",
+        type=int,
+        default=5,
+        help="Maximum number of concurrent LLM summarization calls (default: 5)",
+    )
+
+    parser.add_argument(
+        "--orchestrator",
+        default="local",
+        choices=["local", "temporal"],
+        help=(
+            "Orchestrator to use: 'local' for async pipeline, "
+            "'temporal' for Temporal workflows (default: local)"
+        ),
+    )
+
+    parser.add_argument(
+        "--temporal-address",
+        default="localhost:7233",
+        help="Temporal server address (default: localhost:7233)",
+    )
+
     return parser.parse_args()
 
 
@@ -102,9 +129,7 @@ def show_splash() -> None:
     """Display the splash screen."""
     print(
         color_text(
-            draw_box(
-                "LLMsTxt Architect - Generate LLMs.txt from web content", "green", 2
-            ),
+            draw_box("LLMsTxt Architect - Generate LLMs.txt from web content", "green", 2),
             "green",
         )
     )
@@ -124,11 +149,7 @@ def main() -> None:
 
     # Handle update-descriptions-only flag (requires existing-llms-file)
     if args.update_descriptions_only and not args.existing_llms_file:
-        print(
-            color_text(
-                "Error: --update-descriptions-only requires --existing-llms-file", "red"
-            )
-        )
+        print(color_text("Error: --update-descriptions-only requires --existing-llms-file", "red"))
         sys.exit(1)
 
     # If using existing llms file but no URLs specified, will extract from file
@@ -136,33 +157,61 @@ def main() -> None:
 
     # Print status message for clarity
     if args.existing_llms_file:
-        print(
-            color_text(f"Using existing llms file: {args.existing_llms_file}", "blue")
-        )
+        print(color_text(f"Using existing llms file: {args.existing_llms_file}", "blue"))
         if args.update_descriptions_only:
-            print(
-                color_text(
-                    "Mode: Update descriptions only (preserving structure)", "blue"
-                )
-            )
+            print(color_text("Mode: Update descriptions only (preserving structure)", "blue"))
 
     try:
-        asyncio.run(
-            generate_llms_txt(
-                urls=urls,
-                max_depth=args.max_depth,
-                llm_name=args.llm_name,
-                llm_provider=args.llm_provider,
-                project_dir=args.project_dir,
-                output_dir=args.output_dir,
-                output_file=args.output_file,
-                summary_prompt=args.summary_prompt,
-                blacklist_file=args.blacklist_file,
-                extractor=extractor_func,
-                existing_llms_file=args.existing_llms_file,
-                update_descriptions_only=args.update_descriptions_only,
+        if args.orchestrator == "temporal":
+            try:
+                from llmstxt_architect.temporal.client import run_temporal_workflow
+            except ImportError:
+                print(
+                    color_text(
+                        "Error: Temporal dependencies not installed. "
+                        "Install with: pip install 'llmstxt_architect[temporal]'",
+                        "red",
+                    )
+                )
+                sys.exit(1)
+
+            asyncio.run(
+                run_temporal_workflow(
+                    urls=urls,
+                    max_depth=args.max_depth,
+                    llm_name=args.llm_name,
+                    llm_provider=args.llm_provider,
+                    project_dir=args.project_dir,
+                    output_dir=args.output_dir,
+                    output_file=args.output_file,
+                    summary_prompt=args.summary_prompt,
+                    blacklist_file=args.blacklist_file,
+                    extractor_name=args.extractor,
+                    existing_llms_file=args.existing_llms_file,
+                    update_descriptions_only=args.update_descriptions_only,
+                    max_concurrent_summaries=args.max_concurrent_summaries,
+                    temporal_address=args.temporal_address,
+                )
             )
-        )
+        else:
+            asyncio.run(
+                generate_llms_txt(
+                    urls=urls,
+                    max_depth=args.max_depth,
+                    llm_name=args.llm_name,
+                    llm_provider=args.llm_provider,
+                    project_dir=args.project_dir,
+                    output_dir=args.output_dir,
+                    output_file=args.output_file,
+                    summary_prompt=args.summary_prompt,
+                    blacklist_file=args.blacklist_file,
+                    extractor=extractor_func,
+                    existing_llms_file=args.existing_llms_file,
+                    update_descriptions_only=args.update_descriptions_only,
+                    max_concurrent_crawls=args.max_concurrent_crawls,
+                    max_concurrent_summaries=args.max_concurrent_summaries,
+                )
+            )
     except KeyboardInterrupt:
         print(color_text("\nOperation cancelled by user.", "yellow"))
         sys.exit(1)

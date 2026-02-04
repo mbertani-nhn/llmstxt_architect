@@ -2,11 +2,12 @@
 LLM-based summarization of web page content.
 """
 
+import asyncio
 import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from langchain.chat_models import init_chat_model
 
@@ -22,6 +23,7 @@ class Summarizer:
         output_dir: str = "summaries",
         blacklist_file: str = None,
         existing_llms_file: str = None,
+        max_concurrent_summaries: int = 5,
     ) -> None:
         """
         Initialize the summarizer.
@@ -33,6 +35,7 @@ class Summarizer:
             output_dir: Directory to save summaries
             blacklist_file: Path to a file containing blacklisted URLs (one per line)
             existing_llms_file: Path to an existing llms.txt file to preserve structure from
+            max_concurrent_summaries: Maximum number of concurrent LLM summarization calls
         """
         self.llm_name = llm_name
         self.llm_provider = llm_provider
@@ -42,6 +45,8 @@ class Summarizer:
         self.blacklist_file = blacklist_file
         self.existing_llms_file = existing_llms_file
         self.url_titles = {}  # Map of URLs to their titles from existing file
+        self.max_concurrent_summaries = max_concurrent_summaries
+        self._log_lock = asyncio.Lock()
 
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
@@ -89,9 +94,7 @@ class Summarizer:
                 # Normalize URLs by removing trailing slashes
                 blacklisted_urls = [url.rstrip("/") for url in urls]
 
-            print(
-                f"Loaded {len(blacklisted_urls)} blacklisted URLs from {self.blacklist_file}"
-            )
+            print(f"Loaded {len(blacklisted_urls)} blacklisted URLs from {self.blacklist_file}")
 
         return blacklisted_urls
 
@@ -99,6 +102,18 @@ class Summarizer:
         """Save the log of summarized URLs."""
         with open(self.log_file, "w") as f:
             json.dump(self.summarized_urls, f, indent=2)
+
+    @staticmethod
+    def _write_file(path: Path, content: str) -> None:
+        """Write content to a file. Used with asyncio.to_thread."""
+        with open(path, "w") as f:
+            f.write(content)
+
+    @staticmethod
+    def _read_file(path: Path) -> str:
+        """Read content from a file. Used with asyncio.to_thread."""
+        with open(path, "r") as f:
+            return f.read()
 
     def _get_summary_filename(self, url: str) -> str:
         """Generate a filename for the summary based on the URL."""
@@ -143,9 +158,7 @@ class Summarizer:
             for title, url in matches:
                 self.url_titles[url] = title
 
-            print(
-                f"Extracted {len(self.url_titles)} URL titles from llms.txt ({source_desc})"
-            )
+            print(f"Extracted {len(self.url_titles)} URL titles from llms.txt ({source_desc})")
         except Exception as e:
             print(f"Error parsing URL titles from existing file: {str(e)}")
 
@@ -176,15 +189,14 @@ class Summarizer:
             # Return the summary from file
             summary_path = self.output_dir / self.summarized_urls[url]
             if summary_path.exists():
-                with open(summary_path, "r") as f:
-                    return f.read()
+                return await asyncio.to_thread(self._read_file, summary_path)
             return None
 
         try:
             print(f"Summarizing: {url}")
 
             # Generate summary
-            summary_response = self.llm.invoke(
+            summary_response = await self.llm.ainvoke(
                 [
                     {"role": "system", "content": self.summary_prompt},
                     {
@@ -213,14 +225,15 @@ class Summarizer:
             clean_summary = summary.replace("\n\n", " ").replace("\n", " ").strip()
             formatted_summary = f"[{title}]({url}): {clean_summary}\n\n"
 
-            # Save individual summary
+            # Save individual summary (in thread to avoid blocking event loop)
             filename = self._get_summary_filename(url)
-            with open(self.output_dir / filename, "w") as f:
-                f.write(formatted_summary)
+            summary_path = self.output_dir / filename
+            await asyncio.to_thread(self._write_file, summary_path, formatted_summary)
 
-            # Update log
-            self.summarized_urls[url] = filename
-            self._save_log()
+            # Update log (protected by lock for concurrent access)
+            async with self._log_lock:
+                self.summarized_urls[url] = filename
+                await asyncio.to_thread(self._save_log)
 
             return formatted_summary
 
@@ -230,7 +243,7 @@ class Summarizer:
 
     async def summarize_all(self, docs) -> List[str]:
         """
-        Summarize all documents.
+        Summarize all documents concurrently with bounded parallelism.
 
         Args:
             docs: List of documents to summarize
@@ -238,47 +251,40 @@ class Summarizer:
         Returns:
             List of summaries
         """
-        summaries = []
-        preserve_structure = self.existing_llms_file is not None and hasattr(
-            self, "file_structure"
-        )
+        semaphore = asyncio.Semaphore(self.max_concurrent_summaries)
+        preserve_structure = self.existing_llms_file is not None and hasattr(self, "file_structure")
 
-        for doc in docs:
-            try:
-                summary = await self.summarize_document(doc)
-                if summary:
-                    summaries.append(summary)
-                    # Periodically update llms.txt after each successful summary
-                    if len(summaries) % 5 == 0:
-                        update_mode = (
-                            "structure-preserving" if preserve_structure else "sorted"
-                        )
-                        print(
-                            f"Progress: {len(summaries)} documents summarized. Generating {update_mode} llms.txt..."
-                        )
+        async def _summarize_one(doc) -> Optional[str]:
+            """Summarize a single document with semaphore-bounded concurrency."""
+            async with semaphore:
+                try:
+                    return await self.summarize_document(doc)
+                except Exception as e:
+                    url = doc.metadata.get("source", "unknown")
+                    print(f"Failed to summarize document {url}: {str(e)}")
+                    return None
 
-                        # Use a temporary path to avoid conflicts with the final output
-                        temp_output = os.path.join(
-                            os.path.dirname(self.output_dir), "llms.txt"
-                        )
+        # Run all summarizations concurrently (bounded by semaphore)
+        results = await asyncio.gather(*[_summarize_one(doc) for doc in docs])
 
-                        if preserve_structure:
-                            self.generate_structured_llms_txt(
-                                summaries, temp_output, self.file_structure
-                            )
-                        else:
-                            self.generate_llms_txt(summaries, temp_output)
-            except Exception as e:
-                url = doc.metadata.get("source", "unknown")
-                print(f"Failed to summarize document {url}: {str(e)}")
-                # Continue with the next document
-                continue
+        # Filter out None results
+        summaries = [s for s in results if s is not None]
+
+        # Generate progress update after all summaries complete
+        if summaries:
+            update_mode = "structure-preserving" if preserve_structure else "sorted"
+            print(f"Completed: {len(summaries)} documents summarized. Generating {update_mode} llms.txt...")
+
+            temp_output = os.path.join(os.path.dirname(self.output_dir), "llms.txt")
+
+            if preserve_structure:
+                self.generate_structured_llms_txt(summaries, temp_output, self.file_structure)
+            else:
+                self.generate_llms_txt(summaries, temp_output)
 
         return summaries
 
-    def generate_llms_txt(
-        self, summaries: List[str], output_file: str = "llms.txt"
-    ) -> None:
+    def generate_llms_txt(self, summaries: List[str], output_file: str = "llms.txt") -> None:
         """
         Generate the final llms.txt file from all summaries.
 
@@ -301,9 +307,7 @@ class Summarizer:
 
                     # Extract URL from summary content
                     match = url_pattern.search(summary_content)
-                    url = (
-                        match.group(2) if match else filename
-                    )  # Use URL or filename as fallback
+                    url = match.group(2) if match else filename  # Use URL or filename as fallback
 
                     # Normalize URL by removing trailing slash if present
                     normalized_url = url.rstrip("/")
@@ -357,17 +361,13 @@ class Summarizer:
         duplicates_removed = total_files - len(sorted_entries)
 
         # Count blacklisted URLs that were in the summary files
-        blacklisted_count = sum(
-            1 for url, _ in summary_entries if url in self.blacklisted_urls
-        )
+        blacklisted_count = sum(1 for url, _ in summary_entries if url in self.blacklisted_urls)
 
         # Customize message based on context - are we in progress or final output
         is_progress_update = not output_file.endswith(os.path.basename(output_file))
         message_prefix = "Progress update:" if is_progress_update else "Generated"
 
-        print(
-            f"{message_prefix} {output_file} with {len(sorted_entries)} unique summaries sorted by URL."
-        )
+        print(f"{message_prefix} {output_file} with {len(sorted_entries)} unique summaries sorted by URL.")
         if duplicates_removed > 0:
             print(
                 f"Removed {duplicates_removed} duplicate entries (same URL with/without trailing slash or identical content)."
@@ -442,7 +442,7 @@ class Summarizer:
         print(f"{message_prefix} {output_file} with preserved structure:")
         print(f"  - {updated_count} descriptions updated")
         print(f"  - {preserved_count} descriptions preserved (no updates available)")
-        print(f"  - Original structure maintained (headers, spacing, ordering)")
+        print("  - Original structure maintained (headers, spacing, ordering)")
 
         # Only show detailed stats for final output, not progress updates
         if not is_progress_update:
@@ -455,9 +455,7 @@ class Summarizer:
 
             not_updated = [url for url in original_urls if url not in url_to_summary]
             if not_updated:
-                print(
-                    f"Warning: {len(not_updated)} URLs from original file were not updated:"
-                )
+                print(f"Warning: {len(not_updated)} URLs from original file were not updated:")
                 for url in not_updated[:5]:  # Show first 5 only
                     print(f"  - {url}")
                 if len(not_updated) > 5:

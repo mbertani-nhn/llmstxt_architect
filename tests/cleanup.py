@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 """Cleanup script to remove all test directories"""
 
-import os
 import shutil
 from pathlib import Path
 

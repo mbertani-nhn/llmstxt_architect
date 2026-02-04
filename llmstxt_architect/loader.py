@@ -3,13 +3,11 @@ URL loading and document processing.
 """
 
 import asyncio
-import httpx
 import re
-import time
 from collections import OrderedDict
-from typing import Callable, Dict, List, Optional, Tuple, Set
-from urllib.parse import urlparse
+from typing import Callable, Dict, List, Optional, Tuple
 
+import httpx
 from langchain_community.document_loaders import RecursiveUrlLoader
 from langchain_core.documents import Document
 
@@ -19,6 +17,7 @@ async def load_urls(
     max_depth: int = 5,
     extractor: Callable[[str], str] = None,
     existing_llms_file: Optional[str] = None,
+    max_concurrent_crawls: int = 3,
 ) -> List[Document]:
     """
     Load documents from URLs.
@@ -28,6 +27,7 @@ async def load_urls(
         max_depth: Maximum recursion depth (only used for recursive loading)
         extractor: Function to extract content from HTML
         existing_llms_file: Path to an existing llms.txt file to extract URLs from (can be local path or URL)
+        max_concurrent_crawls: Maximum number of concurrent root URL crawls
 
     Returns:
         List of loaded documents
@@ -38,47 +38,48 @@ async def load_urls(
         if urls_from_file:
             urls = urls_from_file
 
-    docs = []
-    processed_count = 0
-    total_urls = len(urls)
+    docs: List[Document] = []
 
     # Use direct URL loading for existing llms.txt files (more efficient)
     if existing_llms_file:
         docs = await load_urls_directly(urls, extractor)
     else:
-        # Use recursive loader for standard URL crawling
-        for url in urls:
-            try:
-                loader = RecursiveUrlLoader(
-                    url,
-                    max_depth=max_depth,
-                    extractor=extractor,
-                )
+        # Use recursive loader for standard URL crawling with concurrency
+        semaphore = asyncio.Semaphore(max_concurrent_crawls)
 
-                # Load documents using async lazy loading (non-blocking)
-                url_docs = []
-                async for d in loader.alazy_load():
-                    url_docs.append(d)
+        async def _crawl_url(url: str) -> List[Document]:
+            """Crawl a single root URL with semaphore-bounded concurrency."""
+            async with semaphore:
+                try:
+                    loader = RecursiveUrlLoader(
+                        url,
+                        max_depth=max_depth,
+                        extractor=extractor,
+                    )
 
-                docs.extend(url_docs)
+                    # Load documents using async lazy loading (non-blocking)
+                    url_docs: List[Document] = []
+                    async for d in loader.alazy_load():
+                        url_docs.append(d)
 
-                # Update progress
-                processed_count += 1
-                if processed_count % 10 == 0 or processed_count == total_urls:
-                    print(f"Progress: {processed_count}/{total_urls} URLs processed")
+                    print(f"Crawled {url}: {len(url_docs)} documents found")
+                    return url_docs
 
-            except Exception as e:
-                print(f"Error loading URL {url}: {str(e)}")
-                continue
+                except Exception as e:
+                    print(f"Error loading URL {url}: {str(e)}")
+                    return []
+
+        # Crawl all root URLs concurrently (bounded by semaphore)
+        results = await asyncio.gather(*[_crawl_url(url) for url in urls])
+        for url_docs in results:
+            docs.extend(url_docs)
 
     print(f"\nLoaded {len(docs)} documents.")
 
     return docs
 
 
-async def load_urls_directly(
-    urls: List[str], extractor: Callable[[str], str] = None
-) -> List[Document]:
+async def load_urls_directly(urls: List[str], extractor: Callable[[str], str] = None) -> List[Document]:
     """
     Load URLs directly without recursion. More efficient for existing llms.txt files.
 
@@ -156,9 +157,7 @@ async def load_urls_directly(
 
         # Report progress
         processed_so_far = min(successful + len(errors), len(processed_urls))
-        print(
-            f"Progress: {processed_so_far}/{len(processed_urls)} unique URLs processed"
-        )
+        print(f"Progress: {processed_so_far}/{len(processed_urls)} unique URLs processed")
 
     # Report final results
     print(f"Successfully loaded {successful} URLs")
@@ -195,9 +194,9 @@ async def fetch_url(
         # Extract page title
         title = extract_title(response.text) or url.split("/")[-1]
 
-        # Extract content
+        # Extract content (run in thread to avoid blocking event loop with CPU work)
         if extractor:
-            content = extractor(response.text)
+            content = await asyncio.to_thread(extractor, response.text)
         else:
             content = response.text
 
@@ -210,9 +209,7 @@ async def fetch_url(
 
 def extract_title(html_content: str) -> Optional[str]:
     """Extract title from HTML content."""
-    title_match = re.search(
-        r"<title>(.*?)</title>", html_content, re.IGNORECASE | re.DOTALL
-    )
+    title_match = re.search(r"<title>(.*?)</title>", html_content, re.IGNORECASE | re.DOTALL)
     if title_match:
         return title_match.group(1).strip()
     return None
@@ -262,9 +259,7 @@ async def extract_urls_from_llms_file(file_path: str) -> List[str]:
         unique_count = len(deduplicated_urls)
         print(f"Extracted {total_urls} URLs from existing llms.txt ({source_desc})")
         if total_urls > unique_count:
-            print(
-                f"Removed {total_urls - unique_count} duplicate URLs, {unique_count} unique URLs remaining"
-            )
+            print(f"Removed {total_urls - unique_count} duplicate URLs, {unique_count} unique URLs remaining")
 
     except Exception as e:
         print(f"Error reading existing llms.txt: {str(e)}")
@@ -377,8 +372,6 @@ def parse_existing_llms_file_content(
                 description = line_stripped[description_start + 1 :].strip()
                 url_to_description[url] = description
 
-    print(
-        f"Parsed {len(url_to_description)} URL descriptions from existing llms.txt ({source_desc})"
-    )
+    print(f"Parsed {len(url_to_description)} URL descriptions from existing llms.txt ({source_desc})")
 
     return url_to_description, file_structure
