@@ -18,6 +18,7 @@ from llmstxt_architect.temporal import TASK_QUEUE
 from llmstxt_architect.temporal.activities import (
     discover_urls,
     generate_output_file,
+    load_batch,
     save_checkpoint,
     summarize_document,
 )
@@ -46,6 +47,7 @@ async def run_worker(temporal_address: str = "localhost:7233") -> None:
             workflows=[CrawlAndSummarizeWorkflow, BatchProcessWorkflow],
             activities=[
                 discover_urls,
+                load_batch,
                 summarize_document,
                 save_checkpoint,
                 generate_output_file,

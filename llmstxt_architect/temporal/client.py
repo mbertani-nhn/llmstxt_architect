@@ -127,3 +127,41 @@ async def run_temporal_workflow(
     print(f"View workflow history at: http://localhost:8233/namespaces/default/workflows/{workflow_id}")
 
     return result
+
+
+async def get_workflow_result(
+    workflow_id: str,
+    temporal_address: str = "localhost:7233",
+) -> str:
+    """
+    Reconnect to an existing workflow and wait for its result.
+
+    Args:
+        workflow_id: The workflow ID to reconnect to
+        temporal_address: Temporal server address
+
+    Returns:
+        The workflow result (path to the generated output file)
+    """
+    print(f"Connecting to Temporal at {temporal_address}...")
+    client = await Client.connect(temporal_address)
+
+    handle = client.get_workflow_handle(workflow_id)
+
+    # Get current status
+    desc = await handle.describe()
+    status = desc.status.name
+    print(f"Workflow {workflow_id} status: {status}")
+
+    if status == "COMPLETED":
+        result = await handle.result()
+        print(f"Output: {result}")
+        return result
+    elif status in ("FAILED", "CANCELED", "TERMINATED", "TIMED_OUT"):
+        print(f"Workflow {workflow_id} ended with status: {status}")
+        raise RuntimeError(f"Workflow {workflow_id} has status {status}")
+    else:
+        print(f"Waiting for workflow {workflow_id} to complete (Ctrl+C to disconnect)...")
+        result = await handle.result()
+        print(f"Workflow completed. Output: {result}")
+        return result

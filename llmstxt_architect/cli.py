@@ -18,7 +18,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Create mutually exclusive group for URL input sources
-    url_group = parser.add_mutually_exclusive_group(required=True)
+    # Not required because --workflow-id can be used instead
+    url_group = parser.add_mutually_exclusive_group(required=False)
 
     url_group.add_argument("--urls", nargs="+", help="List of URLs to process")
 
@@ -122,6 +123,11 @@ def parse_args() -> argparse.Namespace:
         help="Temporal server address (default: localhost:7233)",
     )
 
+    parser.add_argument(
+        "--workflow-id",
+        help="Reconnect to an existing Temporal workflow by ID (e.g. llmstxt-db5b06ab)",
+    )
+
     return parser.parse_args()
 
 
@@ -146,6 +152,43 @@ def main() -> None:
     # Map extractor choice to function (these are coroutines, will be awaited internally)
     extractor_map = {"default": default_extractor, "bs4": bs4_extractor}
     extractor_func = extractor_map[args.extractor]
+
+    # Handle --workflow-id: reconnect to existing Temporal workflow
+    if args.workflow_id:
+        if args.orchestrator != "temporal":
+            print(color_text("Error: --workflow-id requires --orchestrator temporal", "red"))
+            sys.exit(1)
+        try:
+            from llmstxt_architect.temporal.client import get_workflow_result
+        except ImportError:
+            print(
+                color_text(
+                    "Error: Temporal dependencies not installed. "
+                    "Install with: pip install 'llmstxt_architect[temporal]'",
+                    "red",
+                )
+            )
+            sys.exit(1)
+
+        try:
+            asyncio.run(
+                get_workflow_result(
+                    workflow_id=args.workflow_id,
+                    temporal_address=args.temporal_address,
+                )
+            )
+        except KeyboardInterrupt:
+            print(color_text("\nDisconnected. The workflow continues running on the server.", "yellow"))
+            sys.exit(0)
+        except Exception as e:
+            print(color_text(f"Error: {str(e)}", "red"))
+            sys.exit(1)
+        return
+
+    # Validate that URLs or existing-llms-file is provided when not using --workflow-id
+    if not args.urls and not args.existing_llms_file:
+        print(color_text("Error: --urls or --existing-llms-file is required (or use --workflow-id to reconnect)", "red"))
+        sys.exit(1)
 
     # Handle update-descriptions-only flag (requires existing-llms-file)
     if args.update_descriptions_only and not args.existing_llms_file:

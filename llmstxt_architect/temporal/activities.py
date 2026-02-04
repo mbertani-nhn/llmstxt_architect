@@ -6,6 +6,7 @@ summarize documents, write files). They use simple dataclass params for
 serialization across the Temporal boundary.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ class DiscoverUrlsInput:
     """Input for the discover_urls activity."""
 
     urls: List[str]
+    project_dir: str = "llms_txt"
     max_depth: int = 5
     extractor_name: str = "default"
     existing_llms_file: Optional[str] = None
@@ -28,11 +30,32 @@ class DiscoverUrlsInput:
 
 @dataclass
 class DiscoverUrlsOutput:
-    """Output from the discover_urls activity."""
+    """Output from the discover_urls activity.
 
-    urls: List[str]
-    doc_contents: List[str]
-    doc_sources: List[str]
+    All data is saved to a manifest file on disk to avoid exceeding
+    Temporal's payload size limit (~2MB). Only the manifest path and
+    document count are returned through the Temporal boundary.
+    """
+
+    manifest_path: str
+    total_docs: int
+
+
+@dataclass
+class LoadBatchInput:
+    """Input for the load_batch activity."""
+
+    manifest_path: str
+    batch_start: int
+    batch_end: int
+
+
+@dataclass
+class LoadBatchOutput:
+    """Output from the load_batch activity (a single batch of doc metadata)."""
+
+    doc_urls: List[str]
+    doc_content_files: List[str]
     doc_titles: List[str]
 
 
@@ -41,7 +64,7 @@ class SummarizeDocInput:
     """Input for the summarize_document activity."""
 
     url: str
-    content: str
+    content_file: str
     title: str
     llm_name: str
     llm_provider: str
@@ -86,8 +109,9 @@ async def discover_urls(input: DiscoverUrlsInput) -> DiscoverUrlsOutput:
     """
     Discover and fetch all URLs to be summarized.
 
-    This activity performs the crawling/fetching phase, returning document
-    contents and metadata as serializable data.
+    All data (contents, URLs, titles) is saved to disk to avoid
+    exceeding Temporal's payload size limit (~2MB). Returns only
+    the manifest path and document count.
     """
     from llmstxt_architect.extractor import bs4_extractor, default_extractor
     from llmstxt_architect.loader import load_urls
@@ -106,11 +130,52 @@ async def discover_urls(input: DiscoverUrlsInput) -> DiscoverUrlsOutput:
 
     activity.logger.info(f"Discovered {len(docs)} documents")
 
+    # Save document contents to staging files
+    staging_dir = Path(input.project_dir) / ".staging"
+    os.makedirs(staging_dir, exist_ok=True)
+
+    manifest_entries: List[Dict[str, str]] = []
+    for doc in docs:
+        source = doc.metadata.get("source", "")
+        title = doc.metadata.get("title", "")
+        file_hash = hashlib.sha256(source.encode()).hexdigest()[:16]
+        content_path = staging_dir / f"{file_hash}.txt"
+        with open(content_path, "w") as f:
+            f.write(doc.page_content)
+        manifest_entries.append(
+            {"url": source, "title": title, "content_file": str(content_path)}
+        )
+
+    # Save manifest
+    manifest_path = staging_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest_entries, f)
+
+    activity.logger.info(f"Saved {len(manifest_entries)} documents to staging directory")
+
     return DiscoverUrlsOutput(
-        urls=[doc.metadata.get("source", "") for doc in docs],
-        doc_contents=[doc.page_content for doc in docs],
-        doc_sources=[doc.metadata.get("source", "") for doc in docs],
-        doc_titles=[doc.metadata.get("title", "") for doc in docs],
+        manifest_path=str(manifest_path),
+        total_docs=len(manifest_entries),
+    )
+
+
+@activity.defn
+async def load_batch(input: LoadBatchInput) -> LoadBatchOutput:
+    """
+    Load a batch slice of document metadata from the manifest.
+
+    Reads the manifest file and returns only the requested range,
+    keeping Temporal payloads small.
+    """
+    with open(input.manifest_path, "r") as f:
+        manifest: List[Dict[str, str]] = json.load(f)
+
+    batch = manifest[input.batch_start : input.batch_end]
+
+    return LoadBatchOutput(
+        doc_urls=[entry["url"] for entry in batch],
+        doc_content_files=[entry["content_file"] for entry in batch],
+        doc_titles=[entry["title"] for entry in batch],
     )
 
 
@@ -155,6 +220,10 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
     try:
         activity.logger.info(f"Summarizing: {url}")
 
+        # Read content from staging file
+        with open(input.content_file, "r") as f:
+            content = f.read()
+
         llm = init_chat_model(model=input.llm_name, model_provider=input.llm_provider)
 
         summary_response = await llm.ainvoke(
@@ -163,7 +232,7 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
                 {
                     "role": "human",
                     "content": (
-                        f"Read and analyze this content: {input.content}\n\n"
+                        f"Read and analyze this content: {content}\n\n"
                         "Now, provide a summary EXACTLY in this format:\n"
                         "Line 1: 'LLM should read this page when "
                         "(2-3 specific scenarios)'\n"

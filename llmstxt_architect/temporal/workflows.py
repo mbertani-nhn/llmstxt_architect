@@ -11,16 +11,19 @@ from datetime import timedelta
 from typing import Dict, List, Optional
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from llmstxt_architect.temporal.activities import (
         DiscoverUrlsInput,
         GenerateOutputInput,
+        LoadBatchInput,
         SaveCheckpointInput,
         SummarizeDocInput,
         SummarizeDocOutput,
         discover_urls,
         generate_output_file,
+        load_batch,
         save_checkpoint,
         summarize_document,
     )
@@ -56,7 +59,7 @@ class BatchProcessInput:
     """Input for a batch processing child workflow."""
 
     doc_urls: List[str]
-    doc_contents: List[str]
+    doc_content_files: List[str]
     doc_titles: List[str]
     llm_name: str
     llm_provider: str
@@ -92,10 +95,10 @@ class BatchProcessWorkflow:
 
         # Create activity inputs for all docs in the batch
         tasks = []
-        for url, content, title in zip(input.doc_urls, input.doc_contents, input.doc_titles):
+        for url, content_file, title in zip(input.doc_urls, input.doc_content_files, input.doc_titles):
             task_input = SummarizeDocInput(
                 url=url,
-                content=content,
+                content_file=content_file,
                 title=title,
                 llm_name=input.llm_name,
                 llm_provider=input.llm_provider,
@@ -109,7 +112,7 @@ class BatchProcessWorkflow:
                     summarize_document,
                     task_input,
                     start_to_close_timeout=timedelta(minutes=5),
-                    retry_policy=workflow.RetryPolicy(
+                    retry_policy=RetryPolicy(
                         initial_interval=timedelta(seconds=2),
                         maximum_interval=timedelta(seconds=30),
                         maximum_attempts=3,
@@ -158,32 +161,32 @@ class CrawlAndSummarizeWorkflow:
     @workflow.run
     async def run(self, input: CrawlAndSummarizeInput) -> str:
         """Run the full pipeline."""
-        import os
-
-        # Construct paths
-        summaries_path = os.path.join(input.project_dir, input.output_dir)
-        output_file_path = os.path.join(input.project_dir, input.output_file)
+        # Construct paths (avoid os.path inside workflow sandbox)
+        summaries_path = f"{input.project_dir}/{input.output_dir}"
+        output_file_path = f"{input.project_dir}/{input.output_file}"
 
         workflow.logger.info(f"Starting crawl-and-summarize workflow for {len(input.urls)} URLs")
 
-        # Phase 1: Discover URLs
+        # Phase 1: Discover URLs (saves content to disk, returns manifest path)
         discover_output = await workflow.execute_activity(
             discover_urls,
             DiscoverUrlsInput(
                 urls=input.urls,
+                project_dir=input.project_dir,
                 max_depth=input.max_depth,
                 extractor_name=input.extractor_name,
                 existing_llms_file=input.existing_llms_file,
             ),
             start_to_close_timeout=timedelta(minutes=30),
-            retry_policy=workflow.RetryPolicy(
+            retry_policy=RetryPolicy(
                 initial_interval=timedelta(seconds=5),
                 maximum_interval=timedelta(minutes=2),
                 maximum_attempts=3,
             ),
         )
 
-        total_docs = len(discover_output.doc_contents)
+        total_docs = discover_output.total_docs
+        manifest_path = discover_output.manifest_path
         workflow.logger.info(f"Discovered {total_docs} documents to summarize")
 
         # Phase 2: Process documents in batches via child workflows
@@ -193,10 +196,21 @@ class CrawlAndSummarizeWorkflow:
         for batch_start in range(0, total_docs, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, total_docs)
 
+            # Load batch metadata from manifest (small payload)
+            batch_data = await workflow.execute_activity(
+                load_batch,
+                LoadBatchInput(
+                    manifest_path=manifest_path,
+                    batch_start=batch_start,
+                    batch_end=batch_end,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
             batch_input = BatchProcessInput(
-                doc_urls=discover_output.doc_sources[batch_start:batch_end],
-                doc_contents=discover_output.doc_contents[batch_start:batch_end],
-                doc_titles=discover_output.doc_titles[batch_start:batch_end],
+                doc_urls=batch_data.doc_urls,
+                doc_content_files=batch_data.doc_content_files,
+                doc_titles=batch_data.doc_titles,
                 llm_name=input.llm_name,
                 llm_provider=input.llm_provider,
                 summary_prompt=input.summary_prompt,

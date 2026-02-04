@@ -94,6 +94,11 @@ The full list of configurations is available in the [CLI help](https://github.co
 | `--summary-prompt` | str | "You are creating a summary..." | Prompt to use for summarization |
 | `--blacklist-file` | str | None | Path to a file containing blacklisted URLs to exclude (one per line) |
 | `--extractor` | str | "default" | HTML content extractor to use (choices: "default" (Markdownify), "bs4" (BeautifulSoup)) |
+| `--max-concurrent-crawls` | int | 3 | Maximum number of root URLs to crawl concurrently |
+| `--max-concurrent-summaries` | int | 5 | Maximum number of documents to summarize concurrently |
+| `--orchestrator` | str | "local" | Pipeline orchestrator (choices: "local", "temporal") |
+| `--temporal-address` | str | "localhost:7233" | Temporal server address (only used with `--orchestrator temporal`) |
+| `--workflow-id` | str | None | Reconnect to an existing Temporal workflow by ID (requires `--orchestrator temporal`) |
 
 ### URLs
 
@@ -267,37 +272,111 @@ The blacklist file should contain one URL per line. Empty lines and lines starti
 
 This is useful for excluding deprecated documentation, beta features, or pages with known issues.
  
+## Temporal Orchestration
+
+By default, LLMsTxt Architect runs a local async pipeline. For durable execution with automatic retries, crash recovery, and a web UI for monitoring, you can use [Temporal](https://temporal.io/) as the workflow orchestrator.
+
+### Prerequisites
+
+Install the Temporal CLI (Go binary):
+```bash
+brew install temporal
+```
+
+Install the optional Python dependency:
+```bash
+pip install "llmstxt_architect[temporal]"
+# or with uv:
+uv sync --extra temporal
+```
+
+### Running with Temporal
+
+1. **Start the Temporal dev server** (in a separate terminal):
+```bash
+temporal server start-dev
+```
+This starts the gRPC frontend on `localhost:7233` and the Web UI at `http://localhost:8233`.
+
+2. **Start the worker** (in a separate terminal):
+```bash
+uv run llmstxt-architect-worker
+# or if installed via pip:
+llmstxt-architect-worker
+```
+
+3. **Run the CLI with Temporal orchestration**:
+```bash
+llmstxt-architect --urls https://example.com --max-depth 1 --llm-name claude-3-7-sonnet-latest --llm-provider anthropic --project-dir output --orchestrator temporal
+```
+
+You can monitor workflow progress at `http://localhost:8233`.
+
+4. **Reconnect to a running or completed workflow**:
+
+If you close the terminal that started a workflow, the workflow keeps running on the Temporal server. You can reconnect to it using the workflow ID (printed when the workflow starts):
+```bash
+llmstxt-architect --orchestrator temporal --workflow-id llmstxt-db5b06ab
+```
+
+This will print the current status and wait for the result if the workflow is still running. Press `Ctrl+C` to disconnect without affecting the workflow.
+
+### What Temporal Provides
+
+- **Durable execution** — workflows survive process crashes and resume automatically
+- **Built-in retry** — per-activity retry with configurable backoff
+- **Observability** — Web UI shows workflow status, history, and errors
+- **Scalability** — multiple workers can process activities in parallel across machines
+
 ## Testing
 
-The package includes tests for various usage scenarios. To run the tests:
+The package includes tests for various usage scenarios. Using `just` (recommended):
+
+```bash
+just test              # Unit tests (CLI + async pipeline + temporal)
+just test-cli          # CLI argument parsing tests
+just test-async        # Async pipeline tests
+just test-temporal     # Temporal integration tests
+just test-api          # API integration test (requires LLM API key)
+just test-all          # Full suite including integration tests
+```
+
+Or run directly:
 
 ```bash
 # Run all tests
 python tests/test_all.py
 
 # Run individual tests
-python tests/test_uvx_claude.py    # Test UVX with Claude
-python tests/test_uvx_ollama.py    # Test UVX with Ollama
-python tests/test_script_claude.py # Test Python script import
-python tests/test_api.py           # Test API usage
-python tests/test_cli.py           # Test CLI argument parsing
+python tests/test_cli.py             # CLI argument parsing
+python tests/test_async_pipeline.py  # Async pipeline (concurrency, ainvoke, etc.)
+python tests/test_temporal.py        # Temporal (dataclasses, imports, entry points)
+python tests/test_api.py             # API usage
+python tests/test_uvx_claude.py      # UVX with Claude
+python tests/test_uvx_ollama.py      # UVX with Ollama
+python tests/test_script_claude.py   # Python script import
 ```
 
 The tests verify:
-- UVX package execution with Claude
-- UVX package execution with local Ollama models
+- CLI argument parsing (including concurrency and orchestrator args)
+- Async pipeline internals (ainvoke, asyncio.to_thread, semaphores, gather, log lock)
+- Temporal integration (dataclass serialization, imports, worker entry point)
+- UVX package execution with Claude and Ollama
 - Python script import functionality
 - API usage
-- CLI argument parsing
-
-All tests check for the creation of the expected output files (llms.txt, summaries directory, and summarized_urls.json) and ensure the proper functionality of the CLI interface.
 
 To clean up all test directories:
 ```bash
 python tests/cleanup.py
 ```
 
-The test system automatically cleans up after itself, removing test directories both before and after test runs to ensure a clean environment.
+Formatting and linting:
+```bash
+just format            # Format with ruff
+just lint-fix          # Lint with ruff + auto-fix
+just typecheck         # Type check with mypy
+just check             # All of the above
+```
 
 ## Connecting to Code Tools
 

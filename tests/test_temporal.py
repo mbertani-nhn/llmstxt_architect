@@ -35,6 +35,8 @@ def test_activity_dataclasses_serializable():
                 DiscoverUrlsInput,
                 DiscoverUrlsOutput,
                 GenerateOutputInput,
+                LoadBatchInput,
+                LoadBatchOutput,
                 SaveCheckpointInput,
                 SummarizeDocInput,
                 SummarizeDocOutput,
@@ -46,29 +48,48 @@ def test_activity_dataclasses_serializable():
         # Test DiscoverUrlsInput
         d = DiscoverUrlsInput(
             urls=["https://example.com"],
+            project_dir="test_project",
             max_depth=2,
             extractor_name="bs4",
         )
         data = asdict(d)
         assert data["urls"] == ["https://example.com"]
+        assert data["project_dir"] == "test_project"
         assert data["max_depth"] == 2
         assert data["extractor_name"] == "bs4"
         assert data["existing_llms_file"] is None
 
         # Test DiscoverUrlsOutput
         out = DiscoverUrlsOutput(
-            urls=["https://example.com"],
-            doc_contents=["content"],
-            doc_sources=["https://example.com"],
-            doc_titles=["Example"],
+            manifest_path="/tmp/staging/manifest.json",
+            total_docs=5,
         )
         data = asdict(out)
-        assert len(data["doc_contents"]) == 1
+        assert data["manifest_path"] == "/tmp/staging/manifest.json"
+        assert data["total_docs"] == 5
+
+        # Test LoadBatchInput/Output
+        lb = LoadBatchInput(
+            manifest_path="/tmp/staging/manifest.json",
+            batch_start=0,
+            batch_end=10,
+        )
+        data = asdict(lb)
+        assert data["batch_start"] == 0
+        assert data["batch_end"] == 10
+
+        lbo = LoadBatchOutput(
+            doc_urls=["https://example.com"],
+            doc_content_files=["/tmp/staging/abc.txt"],
+            doc_titles=["Example"],
+        )
+        data = asdict(lbo)
+        assert len(data["doc_urls"]) == 1
 
         # Test SummarizeDocInput
         s = SummarizeDocInput(
             url="https://example.com",
-            content="test content",
+            content_file="/tmp/staging/abc.txt",
             title="Test",
             llm_name="claude-3",
             llm_provider="anthropic",
@@ -138,7 +159,7 @@ def test_workflow_dataclasses_serializable():
         # Test BatchProcessInput
         b = BatchProcessInput(
             doc_urls=["https://a.com", "https://b.com"],
-            doc_contents=["content a", "content b"],
+            doc_content_files=["/tmp/staging/a.txt", "/tmp/staging/b.txt"],
             doc_titles=["A", "B"],
             llm_name="claude-3",
             llm_provider="anthropic",

@@ -27,9 +27,24 @@ llmstxt-architect --urls https://example.com --max-depth 1 --llm-name claude-3-7
 # Run with concurrency tuning
 llmstxt-architect --urls https://example.com --max-concurrent-crawls 5 --max-concurrent-summaries 10
 
-# Run with Temporal orchestration (requires: pip install 'llmstxt_architect[temporal]')
-llmstxt-architect-worker                     # Start the Temporal worker (separate terminal)
+# Run with Temporal orchestration
+# 1. Install Temporal CLI (one-time)
+brew install temporal
+
+# 2. Start Temporal dev server (separate terminal)
+temporal server start-dev          # gRPC on :7233, Web UI at http://localhost:8233
+
+# 3. Install optional dependency
+uv sync --extra temporal           # or: pip install 'llmstxt_architect[temporal]'
+
+# 4. Start the worker (separate terminal)
+uv run llmstxt-architect-worker
+
+# 5. Run with Temporal orchestration
 llmstxt-architect --urls https://example.com --orchestrator temporal
+
+# 6. Reconnect to an existing workflow by ID
+llmstxt-architect --orchestrator temporal --workflow-id llmstxt-db5b06ab
 
 # Run tests
 just test                    # Unit tests (CLI + async pipeline + temporal)
@@ -40,11 +55,10 @@ just test-api                # API integration test (requires LLM API key)
 just test-all                # Full suite including integration tests
 
 # Formatting and linting
-just format                  # Format with black + isort
-just lint                    # Lint with ruff
-just lint-fix                # Lint with auto-fix
+just format                  # Format with ruff
+just lint-fix                # Lint with ruff + auto-fix
 just typecheck               # Type check with mypy
-just check                   # All of the above
+just check                   # All of the above (format, lint-fix, typecheck)
 ```
 
 ## Project Structure
@@ -63,7 +77,7 @@ llmstxt_architect/
     activities.py   # Temporal activities: discover_urls, summarize_document, save_checkpoint, generate_output_file
     workflows.py    # CrawlAndSummarizeWorkflow (parent) + BatchProcessWorkflow (child, batches of 10)
     worker.py       # Worker process, registered as `llmstxt-architect-worker`
-    client.py       # Client to start workflows from CLI
+    client.py       # Client to start workflows or reconnect by workflow ID
 tests/
   test_all.py             # Master test runner (all tests)
   test_cli.py             # CLI argument parsing (original + concurrency + orchestrator args)
