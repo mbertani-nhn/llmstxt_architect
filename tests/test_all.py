@@ -19,10 +19,10 @@ async def run_all_tests():
     # First, clean up any existing test directories
     print("\nCleaning up existing test directories...")
     cleanup_test_dirs()
-    
+
     # Track test results
     results = {}
-    
+
     # Test 1: UVX with Claude
     print("\nRunning Test 1: UVX with Claude...")
     try:
@@ -39,7 +39,7 @@ async def run_all_tests():
         print("❌ Test 1 failed:")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
-    
+
     # Test 2: UVX with Ollama
     print("\nRunning Test 2: UVX with Ollama...")
     try:
@@ -56,7 +56,7 @@ async def run_all_tests():
         print("❌ Test 2 failed:")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
-    
+
     # Test 3: Script import
     print("\nRunning Test 3: Script import...")
     try:
@@ -69,7 +69,7 @@ async def run_all_tests():
     except Exception as e:
         results["script_claude"] = False
         print(f"❌ Test 3 failed with error: {e}")
-        
+
     # Test 4: API usage
     print("\nRunning Test 4: API usage...")
     try:
@@ -86,7 +86,7 @@ async def run_all_tests():
         print("❌ Test 4 failed:")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
-        
+
     # Test 5: CLI argument parsing
     print("\nRunning Test 5: CLI argument parsing...")
     try:
@@ -103,16 +103,16 @@ async def run_all_tests():
         print("❌ Test 5 failed:")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
-    
+
     # Print summary
     print("\nTest Summary:")
     for test_name, result in results.items():
         print(f"{test_name}: {'✅ PASSED' if result else '❌ FAILED'}")
-    
+
     # Run final cleanup to ensure a clean environment
     print("\nRunning final cleanup...")
     cleanup_test_dirs()
-    
+
     # Return overall success (True if all tests passed)
     return all(results.values())
 
