@@ -82,8 +82,9 @@ The full list of configurations is available in the [CLI help](https://github.co
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `--urls` | List[str] | (Required if not using `--existing-llms-file`) | List of URLs to process |
-| `--existing-llms-file` | str | (Required if not using `--urls`) | Path to an existing llms.txt file to extract URLs from and update |
+| `--urls` | List[str] | (Required if not using `--urls-from-file` or `--existing-llms-file`) | List of URLs to process |
+| `--urls-from-file` | str | (Required if not using `--urls` or `--existing-llms-file`) | Path to a file containing URLs to process (one per line) |
+| `--existing-llms-file` | str | (Required if not using `--urls` or `--urls-from-file`) | Path to an existing llms.txt file to extract URLs from and update |
 | `--update-descriptions-only` | flag | False | Update only descriptions in existing llms.txt while preserving structure and URL order |
 | `--max-depth` | int | 5 | Maximum recursion depth for URL crawling |
 | `--llm-name` | str | "claude-3-sonnet-20240229" | LLM model name |
@@ -115,6 +116,25 @@ Max depth can be used to increase the search depth:
   - max_depth=2: Returns the initial page plus direct links from that page
   - max_depth=3: Returns the initial page, direct links, and links found on those pages
   etc.
+```
+
+### URLs from File
+
+You can also provide URLs in a file (one per line), which is useful when you have many URLs for a RAG system or want to version-control your URL list. Empty lines and lines starting with `#` are ignored.
+
+```bash
+# Create a URL file
+cat > my_urls.txt << EOF
+# API documentation
+https://example.com/api/v1
+https://example.com/api/v2
+
+# Guides
+https://example.com/guides/quickstart
+https://example.com/guides/advanced
+EOF
+
+llmstxt-architect --urls-from-file my_urls.txt --max-depth 1 --llm-name claude-3-7-sonnet-latest --llm-provider anthropic --project-dir output
 ```
 
 ### Existing llms.txt File

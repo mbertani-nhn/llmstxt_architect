@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     url_group.add_argument("--urls", nargs="+", help="List of URLs to process")
 
     url_group.add_argument(
+        "--urls-from-file",
+        help="Path to a file containing URLs to process (one per line)",
+    )
+
+    url_group.add_argument(
         "--existing-llms-file",
         help="Path to an existing llms.txt file to extract URLs from and update",
     )
@@ -185,9 +190,9 @@ def main() -> None:
             sys.exit(1)
         return
 
-    # Validate that URLs or existing-llms-file is provided when not using --workflow-id
-    if not args.urls and not args.existing_llms_file:
-        print(color_text("Error: --urls or --existing-llms-file is required (or use --workflow-id to reconnect)", "red"))
+    # Validate that a URL source is provided when not using --workflow-id
+    if not args.urls and not args.urls_from_file and not args.existing_llms_file:
+        print(color_text("Error: --urls, --urls-from-file, or --existing-llms-file is required (or use --workflow-id to reconnect)", "red"))
         sys.exit(1)
 
     # Handle update-descriptions-only flag (requires existing-llms-file)
@@ -195,8 +200,17 @@ def main() -> None:
         print(color_text("Error: --update-descriptions-only requires --existing-llms-file", "red"))
         sys.exit(1)
 
-    # If using existing llms file but no URLs specified, will extract from file
-    urls = args.urls or []
+    # Load URLs from file if specified
+    if args.urls_from_file:
+        try:
+            with open(args.urls_from_file, "r") as f:
+                urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            print(color_text(f"Loaded {len(urls)} URLs from {args.urls_from_file}", "blue"))
+        except FileNotFoundError:
+            print(color_text(f"Error: File not found: {args.urls_from_file}", "red"))
+            sys.exit(1)
+    else:
+        urls = args.urls or []
 
     # Print status message for clarity
     if args.existing_llms_file:
