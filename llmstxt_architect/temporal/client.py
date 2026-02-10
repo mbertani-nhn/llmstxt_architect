@@ -21,6 +21,7 @@ async def run_temporal_workflow(
     project_dir: str = "llms_txt",
     output_dir: str = "summaries",
     output_file: str = "llms.txt",
+    output_format: str = "txt",
     summary_prompt: str = "",
     blacklist_file: Optional[str] = None,
     extractor_name: str = "default",
@@ -40,6 +41,7 @@ async def run_temporal_workflow(
         project_dir: Output project directory
         output_dir: Summaries subdirectory name
         output_file: Output filename
+        output_format: Output format, either "txt" or "jsonl"
         summary_prompt: Prompt for summarization
         blacklist_file: Path to blacklist file
         extractor_name: Content extractor name
@@ -104,6 +106,7 @@ async def run_temporal_workflow(
         project_dir=project_dir,
         output_dir=output_dir,
         output_file=output_file,
+        output_format=output_format,
         blacklist_file=blacklist_file,
         extractor_name=extractor_name,
         existing_llms_file=existing_llms_file,

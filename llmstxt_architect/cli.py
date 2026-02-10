@@ -33,9 +33,9 @@ def parse_args() -> argparse.Namespace:
         help="Path to an existing llms.txt file to extract URLs from and update",
     )
 
-    # Support legacy format for compatibility (--urls is no longer required when --existing-llms-file is present)
-    # This is a workaround for uvx which might be passing arguments differently
-    # Handle the case when args are manually specified on command line
+    # Support legacy format for compatibility
+    # --urls is no longer required when --existing-llms-file is present
+    # This is a workaround for uvx which might be passing args differently
 
     parser.add_argument(
         "--update-descriptions-only",
@@ -72,8 +72,15 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--output-file",
-        default="llms.txt",
-        help="Output file name for combined summaries (default: llms.txt)",
+        default=None,
+        help="Output file name for combined summaries (default: llms.txt or llms.jsonl based on format)",
+    )
+
+    parser.add_argument(
+        "--output-format",
+        default="txt",
+        choices=["txt", "jsonl"],
+        help="Output format: 'txt' for llms.txt, 'jsonl' for structured JSON Lines (default: txt)",
     )
 
     parser.add_argument(
@@ -192,7 +199,11 @@ def main() -> None:
 
     # Validate that a URL source is provided when not using --workflow-id
     if not args.urls and not args.urls_from_file and not args.existing_llms_file:
-        print(color_text("Error: --urls, --urls-from-file, or --existing-llms-file is required (or use --workflow-id to reconnect)", "red"))
+        err_msg = (
+            "Error: --urls, --urls-from-file, or --existing-llms-file "
+            "is required (or use --workflow-id to reconnect)"
+        )
+        print(color_text(err_msg, "red"))
         sys.exit(1)
 
     # Handle update-descriptions-only flag (requires existing-llms-file)
@@ -212,11 +223,18 @@ def main() -> None:
     else:
         urls = args.urls or []
 
+    # Set default output file based on format if not explicitly provided
+    if args.output_file is None:
+        args.output_file = "llms.jsonl" if args.output_format == "jsonl" else "llms.txt"
+
     # Print status message for clarity
     if args.existing_llms_file:
         print(color_text(f"Using existing llms file: {args.existing_llms_file}", "blue"))
         if args.update_descriptions_only:
             print(color_text("Mode: Update descriptions only (preserving structure)", "blue"))
+
+    if args.output_format == "jsonl":
+        print(color_text(f"Output format: JSONL (structured JSON Lines -> {args.output_file})", "blue"))
 
     try:
         if args.orchestrator == "temporal":
@@ -241,6 +259,7 @@ def main() -> None:
                     project_dir=args.project_dir,
                     output_dir=args.output_dir,
                     output_file=args.output_file,
+                    output_format=args.output_format,
                     summary_prompt=args.summary_prompt,
                     blacklist_file=args.blacklist_file,
                     extractor_name=args.extractor,
@@ -260,6 +279,7 @@ def main() -> None:
                     project_dir=args.project_dir,
                     output_dir=args.output_dir,
                     output_file=args.output_file,
+                    output_format=args.output_format,
                     summary_prompt=args.summary_prompt,
                     blacklist_file=args.blacklist_file,
                     extractor=extractor_func,

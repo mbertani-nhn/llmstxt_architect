@@ -8,7 +8,7 @@ documents in batches, keeping event histories small.
 
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -44,6 +44,7 @@ class CrawlAndSummarizeInput:
     project_dir: str = "llms_txt"
     output_dir: str = "summaries"
     output_file: str = "llms.txt"
+    output_format: str = "txt"
     blacklist_file: Optional[str] = None
     extractor_name: str = "default"
     existing_llms_file: Optional[str] = None
@@ -68,6 +69,17 @@ class BatchProcessInput:
     blacklisted_urls: List[str] = field(default_factory=list)
     url_titles: Dict[str, str] = field(default_factory=dict)
     max_concurrent_summaries: int = 5
+    output_format: str = "txt"
+
+
+@dataclass
+class JsonlEntryData:
+    """JSONL entry data for workflow."""
+
+    url: str
+    content: str
+    summary: str
+    keywords: List[str]
 
 
 @dataclass
@@ -76,6 +88,7 @@ class BatchProcessOutput:
 
     summaries: List[str]
     summarized_urls: Dict[str, str]
+    jsonl_entries: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @workflow.defn
@@ -92,6 +105,7 @@ class BatchProcessWorkflow:
         """Process a batch of documents."""
         summaries: List[str] = []
         summarized_urls: Dict[str, str] = {}
+        # JSONL entries are saved to disk during summarization, not returned here
 
         # Create activity inputs for all docs in the batch
         tasks = []
@@ -106,6 +120,7 @@ class BatchProcessWorkflow:
                 output_dir=input.output_dir,
                 blacklisted_urls=input.blacklisted_urls,
                 url_titles=input.url_titles,
+                output_format=input.output_format,
             )
             tasks.append(
                 workflow.execute_activity(
@@ -130,6 +145,7 @@ class BatchProcessWorkflow:
             if result.summary and result.filename:
                 summaries.append(result.summary)
                 summarized_urls[result.url] = result.filename
+                # JSONL entries are saved to disk in the activity, not collected here
             elif result.error:
                 workflow.logger.warning(f"Failed to summarize {result.url}: {result.error}")
 
@@ -143,7 +159,11 @@ class BatchProcessWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
         )
 
-        return BatchProcessOutput(summaries=summaries, summarized_urls=summarized_urls)
+        return BatchProcessOutput(
+            summaries=summaries,
+            summarized_urls=summarized_urls,
+            # jsonl_entries are read from disk, not passed through workflow
+        )
 
 
 @workflow.defn
@@ -192,6 +212,8 @@ class CrawlAndSummarizeWorkflow:
         # Phase 2: Process documents in batches via child workflows
         all_summaries: List[str] = []
         all_summarized_urls: Dict[str, str] = {}
+        # Note: JSONL entries are saved to disk during summarization and read back
+        # in generate_output_file to avoid exceeding Temporal's gRPC message size limit
 
         for batch_start in range(0, total_docs, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, total_docs)
@@ -218,6 +240,7 @@ class CrawlAndSummarizeWorkflow:
                 blacklisted_urls=input.blacklisted_urls,
                 url_titles=input.url_titles,
                 max_concurrent_summaries=input.max_concurrent_summaries,
+                output_format=input.output_format,
             )
 
             batch_output = await workflow.execute_child_workflow(
@@ -228,6 +251,7 @@ class CrawlAndSummarizeWorkflow:
 
             all_summaries.extend(batch_output.summaries)
             all_summarized_urls.update(batch_output.summarized_urls)
+            # JSONL entries are read from disk, not passed through workflow
 
             workflow.logger.info(
                 f"Batch {batch_start}-{batch_end} complete: {len(batch_output.summaries)} summaries"
@@ -246,6 +270,7 @@ class CrawlAndSummarizeWorkflow:
                     project_dir=input.project_dir,
                     output_dir=input.output_dir,
                     output_file=input.output_file,
+                    output_format=input.output_format,
                     blacklist_file=input.blacklist_file,
                     extractor_name=input.extractor_name,
                     existing_llms_file=input.existing_llms_file,
@@ -258,6 +283,7 @@ class CrawlAndSummarizeWorkflow:
                 workflow.continue_as_new(remaining_input)
 
         # Phase 3: Generate final output file
+        # Note: JSONL entries are read from disk in the activity, not passed here
         output_path = await workflow.execute_activity(
             generate_output_file,
             GenerateOutputInput(
@@ -266,6 +292,7 @@ class CrawlAndSummarizeWorkflow:
                 output_dir=summaries_path,
                 blacklisted_urls=input.blacklisted_urls,
                 file_structure=input.file_structure,
+                output_format=input.output_format,
             ),
             start_to_close_timeout=timedelta(minutes=5),
         )

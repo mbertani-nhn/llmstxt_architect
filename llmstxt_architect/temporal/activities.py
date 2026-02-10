@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from temporalio import activity
 
@@ -72,6 +72,7 @@ class SummarizeDocInput:
     output_dir: str
     blacklisted_urls: List[str] = field(default_factory=list)
     url_titles: Dict[str, str] = field(default_factory=dict)
+    output_format: str = "txt"
 
 
 @dataclass
@@ -83,6 +84,9 @@ class SummarizeDocOutput:
     filename: Optional[str] = None
     skipped: bool = False
     error: Optional[str] = None
+    # New fields for JSONL format
+    content: Optional[str] = None
+    keywords: Optional[List[str]] = None
 
 
 @dataclass
@@ -94,6 +98,16 @@ class SaveCheckpointInput:
 
 
 @dataclass
+class JsonlEntry:
+    """A single JSONL entry for output."""
+
+    url: str
+    content: str
+    summary: str
+    keywords: List[str]
+
+
+@dataclass
 class GenerateOutputInput:
     """Input for the generate_output activity."""
 
@@ -102,6 +116,8 @@ class GenerateOutputInput:
     output_dir: str
     blacklisted_urls: List[str] = field(default_factory=list)
     file_structure: Optional[List[str]] = None
+    output_format: str = "txt"
+    jsonl_entries: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @activity.defn
@@ -142,9 +158,7 @@ async def discover_urls(input: DiscoverUrlsInput) -> DiscoverUrlsOutput:
         content_path = staging_dir / f"{file_hash}.txt"
         with open(content_path, "w") as f:
             f.write(doc.page_content)
-        manifest_entries.append(
-            {"url": source, "title": title, "content_file": str(content_path)}
-        )
+        manifest_entries.append({"url": source, "title": title, "content_file": str(content_path)})
 
     # Save manifest
     manifest_path = staging_dir / "manifest.json"
@@ -179,6 +193,34 @@ async def load_batch(input: LoadBatchInput) -> LoadBatchOutput:
     )
 
 
+def build_jsonl_prompt(user_prompt: str) -> str:
+    """
+    Build the JSONL prompt by wrapping the user's custom prompt with JSON structure requirements.
+
+    The user's prompt controls the summary content (language, style, length, etc.),
+    while this wrapper ensures the output is valid JSON with the required fields.
+
+    Args:
+        user_prompt: The user's custom summarization instructions
+
+    Returns:
+        Complete prompt that merges user instructions with JSON format requirements
+    """
+    return f"""You are analyzing a webpage to create a structured summary for LLM retrieval.
+
+Instructions for the summary content:
+{user_prompt}
+
+You MUST return ONLY valid JSON with these exact fields:
+{{
+  "summary": "Your summary following the instructions above",
+  "keywords": ["array", "of", "5-15", "relevant", "keywords", "for", "BM25", "search"]
+}}
+
+Include technical terms, concepts, product names, and action verbs in keywords.
+Return valid JSON only, no markdown code blocks or extra text."""
+
+
 @activity.defn
 async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
     """
@@ -199,10 +241,10 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
         activity.logger.info(f"Skipping blacklisted URL: {url}")
         return SummarizeDocOutput(url=url, skipped=True)
 
-    # Check if already summarized (checkpoint file exists)
+    # Check if already summarized (checkpoint file exists) - only for txt format
     output_dir = Path(input.output_dir)
     log_file = output_dir / "summarized_urls.json"
-    if log_file.exists():
+    if input.output_format == "txt" and log_file.exists():
         with open(log_file, "r") as f:
             summarized_urls = json.load(f)
         if url in summarized_urls:
@@ -226,9 +268,15 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
 
         llm = init_chat_model(model=input.llm_name, model_provider=input.llm_provider)
 
+        # Use different prompt for JSONL format (wraps user prompt with JSON requirements)
+        if input.output_format == "jsonl":
+            prompt = build_jsonl_prompt(input.summary_prompt)
+        else:
+            prompt = input.summary_prompt
+
         summary_response = await llm.ainvoke(
             [
-                {"role": "system", "content": input.summary_prompt},
+                {"role": "system", "content": prompt},
                 {
                     "role": "human",
                     "content": f"Summarize this content:\n\n{content}",
@@ -236,7 +284,7 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
             ]
         )
 
-        summary = summary_response.content
+        summary_text = summary_response.content
 
         # Extract page title
         if url in input.url_titles:
@@ -244,22 +292,52 @@ async def summarize_document(input: SummarizeDocInput) -> SummarizeDocOutput:
         else:
             title = input.title or url.split("/")[-1]
 
-        # Format summary
-        clean_summary = summary.replace("\n\n", " ").replace("\n", " ").strip()
-        formatted_summary = f"[{title}]({url}): {clean_summary}\n\n"
-
         # Generate filename
         parsed = urlparse(url)
         filename = f"{parsed.netloc}{parsed.path}".replace("/", "_")
         if not filename.endswith(".txt"):
             filename += ".txt"
 
-        # Save individual summary
         os.makedirs(output_dir, exist_ok=True)
-        with open(output_dir / filename, "w") as f:
-            f.write(formatted_summary)
 
-        return SummarizeDocOutput(url=url, summary=formatted_summary, filename=filename)
+        if input.output_format == "jsonl":
+            # Parse JSON response and build JSONL entry
+            try:
+                parsed_json = json.loads(summary_text.strip())
+                summary = parsed_json.get("summary", summary_text)
+                keywords = parsed_json.get("keywords", [])
+            except json.JSONDecodeError:
+                # Fallback if LLM didn't return valid JSON
+                summary = summary_text.replace("\n\n", " ").replace("\n", " ").strip()
+                keywords = []
+
+            # Save individual summary as JSON
+            entry = {
+                "url": url,
+                "content": content,
+                "summary": summary,
+                "keywords": keywords,
+            }
+            with open(output_dir / filename, "w") as f:
+                f.write(json.dumps(entry, ensure_ascii=False))
+
+            return SummarizeDocOutput(
+                url=url,
+                summary=summary,
+                filename=filename,
+                content=content,
+                keywords=keywords,
+            )
+        else:
+            # Format summary for txt format
+            clean_summary = summary_text.replace("\n\n", " ").replace("\n", " ").strip()
+            formatted_summary = f"[{title}]({url}): {clean_summary}\n\n"
+
+            # Save individual summary
+            with open(output_dir / filename, "w") as f:
+                f.write(formatted_summary)
+
+            return SummarizeDocOutput(url=url, summary=formatted_summary, filename=filename)
 
     except Exception as e:
         activity.logger.error(f"Error summarizing {url}: {str(e)}")
@@ -282,10 +360,78 @@ async def save_checkpoint(input: SaveCheckpointInput) -> None:
 @activity.defn
 async def generate_output_file(input: GenerateOutputInput) -> str:
     """
-    Generate the final llms.txt output file.
+    Generate the final llms.txt or llms.jsonl output file.
 
     Returns the path to the generated file.
     """
+    if input.output_format == "jsonl":
+        # JSONL format output - read entries from saved files on disk
+        # (avoids passing large content through Temporal's gRPC boundary)
+        all_entries: List[Dict[str, Any]] = []
+        output_dir = Path(input.output_dir)
+
+        activity.logger.info(
+            f"Looking for JSONL entries in: {output_dir} (absolute: {output_dir.absolute()})"
+        )
+        activity.logger.info(f"Current working directory: {Path.cwd()}")
+
+        if output_dir.exists():
+            all_files = os.listdir(output_dir)
+            txt_files = [f for f in all_files if f.endswith(".txt")]
+            activity.logger.info(f"Found {len(txt_files)} .txt files in {output_dir}")
+
+            for filename in txt_files:
+                if filename == os.path.basename(input.output_file):
+                    continue
+                file_path = output_dir / filename
+                try:
+                    with open(file_path, "r") as f:
+                        content = f.read()
+                        # Try to parse as JSON (JSONL format saves as JSON)
+                        entry = json.loads(content)
+                        if isinstance(entry, dict) and "url" in entry:
+                            all_entries.append(entry)
+                        else:
+                            activity.logger.warning(
+                                f"File {filename} is not a valid JSONL entry (missing 'url' key)"
+                            )
+                except json.JSONDecodeError as e:
+                    # This file contains txt-format summary, not JSON - skip it
+                    activity.logger.debug(f"Skipping {filename}: not valid JSON ({e})")
+                except Exception as e:
+                    activity.logger.warning(f"Error reading {filename}: {e}")
+
+            activity.logger.info(f"Loaded {len(all_entries)} JSONL entries from disk")
+        else:
+            activity.logger.warning(f"Output directory does not exist: {output_dir}")
+
+        # Deduplicate by URL
+        seen_urls: set = set()
+        unique_entries: List[Dict[str, Any]] = []
+
+        for entry in all_entries:
+            url = entry.get("url", "").rstrip("/")
+            # Skip blacklisted URLs
+            if url in input.blacklisted_urls:
+                continue
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_entries.append(entry)
+
+        # Sort by URL
+        unique_entries.sort(key=lambda x: x.get("url", ""))
+
+        # Write JSONL output
+        with open(input.output_file, "w") as f:
+            for entry in unique_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        activity.logger.info(
+            f"Generated JSONL output file: {input.output_file} with {len(unique_entries)} entries"
+        )
+        return input.output_file
+
+    # TXT format output (existing logic)
     url_pattern = re.compile(r"\[(.*?)\]\((https?://[^\s)]+)\)")
 
     if input.file_structure:
@@ -342,14 +488,14 @@ async def generate_output_file(input: GenerateOutputInput) -> str:
         for url, content in summary_entries:
             url_to_entries.setdefault(url, []).append(content)
 
-        unique_entries = []
+        unique_entries_txt = []
         for url, contents in url_to_entries.items():
             contents.sort(key=len, reverse=True)
-            unique_entries.append((url, contents[0]))
+            unique_entries_txt.append((url, contents[0]))
 
         seen_content: set = set()
         final_entries = []
-        for url, content in unique_entries:
+        for url, content in unique_entries_txt:
             if content not in seen_content:
                 final_entries.append((url, content))
                 seen_content.add(content)

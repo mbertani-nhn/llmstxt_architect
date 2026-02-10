@@ -7,9 +7,37 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from langchain.chat_models import init_chat_model
+
+
+def build_jsonl_prompt(user_prompt: str) -> str:
+    """
+    Build the JSONL prompt by wrapping the user's custom prompt with JSON structure requirements.
+
+    The user's prompt controls the summary content (language, style, length, etc.),
+    while this wrapper ensures the output is valid JSON with the required fields.
+
+    Args:
+        user_prompt: The user's custom summarization instructions
+
+    Returns:
+        Complete prompt that merges user instructions with JSON format requirements
+    """
+    return f"""You are analyzing a webpage to create a structured summary for LLM retrieval.
+
+Instructions for the summary content:
+{user_prompt}
+
+You MUST return ONLY valid JSON with these exact fields:
+{{
+  "summary": "Your summary following the instructions above",
+  "keywords": ["array", "of", "5-15", "relevant", "keywords", "for", "BM25", "search"]
+}}
+
+Include technical terms, concepts, product names, and action verbs in keywords.
+Return valid JSON only, no markdown code blocks or extra text."""
 
 
 class Summarizer:
@@ -24,6 +52,7 @@ class Summarizer:
         blacklist_file: str = None,
         existing_llms_file: str = None,
         max_concurrent_summaries: int = 5,
+        output_format: str = "txt",
     ) -> None:
         """
         Initialize the summarizer.
@@ -36,6 +65,7 @@ class Summarizer:
             blacklist_file: Path to a file containing blacklisted URLs (one per line)
             existing_llms_file: Path to an existing llms.txt file to preserve structure from
             max_concurrent_summaries: Maximum number of concurrent LLM summarization calls
+            output_format: Output format, either "txt" or "jsonl"
         """
         self.llm_name = llm_name
         self.llm_provider = llm_provider
@@ -46,6 +76,8 @@ class Summarizer:
         self.existing_llms_file = existing_llms_file
         self.url_titles = {}  # Map of URLs to their titles from existing file
         self.max_concurrent_summaries = max_concurrent_summaries
+        self.output_format = output_format
+        self.jsonl_entries: List[Dict[str, Any]] = []  # Store entries for JSONL output
         self._log_lock = asyncio.Lock()
 
         # Create output directory if it doesn't exist
@@ -162,7 +194,7 @@ class Summarizer:
         except Exception as e:
             print(f"Error parsing URL titles from existing file: {str(e)}")
 
-    async def summarize_document(self, doc) -> Optional[str]:
+    async def summarize_document(self, doc: Any) -> Optional[Union[str, Dict[str, Any]]]:
         """
         Summarize a document.
 
@@ -170,7 +202,8 @@ class Summarizer:
             doc: Document to summarize
 
         Returns:
-            Summary of the document
+            For txt format: Formatted summary string
+            For jsonl format: Dict with url, content, summary, keywords
         """
         url = doc.metadata.get("source", "")
 
@@ -182,8 +215,8 @@ class Summarizer:
             print(f"Skipping blacklisted URL: {url}")
             return None
 
-        # Check if already summarized
-        if url in self.summarized_urls:
+        # Check if already summarized (only for txt format - JSONL needs fresh processing)
+        if self.output_format == "txt" and url in self.summarized_urls:
             print(f"Already summarized: {url}")
 
             # Return the summary from file
@@ -195,10 +228,16 @@ class Summarizer:
         try:
             print(f"Summarizing: {url}")
 
+            # Use different prompt for JSONL format
+            if self.output_format == "jsonl":
+                prompt = build_jsonl_prompt(self.summary_prompt)
+            else:
+                prompt = self.summary_prompt
+
             # Generate summary
             summary_response = await self.llm.ainvoke(
                 [
-                    {"role": "system", "content": self.summary_prompt},
+                    {"role": "system", "content": prompt},
                     {
                         "role": "human",
                         "content": f"Summarize this content:\n\n{doc.page_content}",
@@ -206,7 +245,7 @@ class Summarizer:
                 ]
             )
 
-            summary = summary_response.content
+            summary_text = summary_response.content
 
             # Extract page title or use URL as fallback
             # If we have a title from existing file, use that instead to preserve it
@@ -215,27 +254,63 @@ class Summarizer:
             else:
                 title = doc.metadata.get("title", url.split("/")[-1])
 
-            # Format summary entry - ensure no extra newlines within the summary
-            clean_summary = summary.replace("\n\n", " ").replace("\n", " ").strip()
-            formatted_summary = f"[{title}]({url}): {clean_summary}\n\n"
+            if self.output_format == "jsonl":
+                # Parse JSON response and build JSONL entry
+                try:
+                    # Try to parse the JSON response
+                    parsed = json.loads(summary_text.strip())
+                    summary = parsed.get("summary", summary_text)
+                    keywords = parsed.get("keywords", [])
+                except json.JSONDecodeError:
+                    # Fallback if LLM didn't return valid JSON
+                    summary = summary_text.replace("\n\n", " ").replace("\n", " ").strip()
+                    keywords = []
 
-            # Save individual summary (in thread to avoid blocking event loop)
-            filename = self._get_summary_filename(url)
-            summary_path = self.output_dir / filename
-            await asyncio.to_thread(self._write_file, summary_path, formatted_summary)
+                entry: Dict[str, Any] = {
+                    "url": url,
+                    "content": doc.page_content,
+                    "summary": summary,
+                    "keywords": keywords,
+                }
 
-            # Update log (protected by lock for concurrent access)
-            async with self._log_lock:
-                self.summarized_urls[url] = filename
-                await asyncio.to_thread(self._save_log)
+                # Store for later output generation
+                self.jsonl_entries.append(entry)
 
-            return formatted_summary
+                # Also save individual summary file for checkpointing
+                filename = self._get_summary_filename(url)
+                summary_path = self.output_dir / filename
+                # Save as JSON for JSONL format
+                await asyncio.to_thread(self._write_file, summary_path, json.dumps(entry, ensure_ascii=False))
+
+                # Update log (protected by lock for concurrent access)
+                async with self._log_lock:
+                    self.summarized_urls[url] = filename
+                    await asyncio.to_thread(self._save_log)
+
+                return entry
+            else:
+                # Standard txt format
+                # Format summary entry - ensure no extra newlines within the summary
+                clean_summary = summary_text.replace("\n\n", " ").replace("\n", " ").strip()
+                formatted_summary = f"[{title}]({url}): {clean_summary}\n\n"
+
+                # Save individual summary (in thread to avoid blocking event loop)
+                filename = self._get_summary_filename(url)
+                summary_path = self.output_dir / filename
+                await asyncio.to_thread(self._write_file, summary_path, formatted_summary)
+
+                # Update log (protected by lock for concurrent access)
+                async with self._log_lock:
+                    self.summarized_urls[url] = filename
+                    await asyncio.to_thread(self._save_log)
+
+                return formatted_summary
 
         except Exception as e:
             print(f"Error summarizing {url}: {str(e)}")
             return None
 
-    async def summarize_all(self, docs) -> List[str]:
+    async def summarize_all(self, docs: List[Any]) -> List[Union[str, Dict[str, Any]]]:
         """
         Summarize all documents concurrently with bounded parallelism.
 
@@ -243,12 +318,14 @@ class Summarizer:
             docs: List of documents to summarize
 
         Returns:
-            List of summaries
+            List of summaries (strings for txt format, dicts for jsonl format)
         """
         semaphore = asyncio.Semaphore(self.max_concurrent_summaries)
         preserve_structure = self.existing_llms_file is not None and hasattr(self, "file_structure")
 
-        async def _summarize_one(doc) -> Optional[str]:
+        async def _summarize_one(
+            doc: Any,
+        ) -> Optional[Union[str, Dict[str, Any]]]:
             """Summarize a single document with semaphore-bounded concurrency."""
             async with semaphore:
                 try:
@@ -262,19 +339,27 @@ class Summarizer:
         results = await asyncio.gather(*[_summarize_one(doc) for doc in docs])
 
         # Filter out None results
-        summaries = [s for s in results if s is not None]
+        summaries: List[Union[str, Dict[str, Any]]] = [s for s in results if s is not None]
 
         # Generate progress update after all summaries complete
         if summaries:
-            update_mode = "structure-preserving" if preserve_structure else "sorted"
-            print(f"Completed: {len(summaries)} documents summarized. Generating {update_mode} llms.txt...")
-
-            temp_output = os.path.join(os.path.dirname(self.output_dir), "llms.txt")
-
-            if preserve_structure:
-                self.generate_structured_llms_txt(summaries, temp_output, self.file_structure)
+            if self.output_format == "jsonl":
+                print(f"Completed: {len(summaries)} documents summarized for JSONL output.")
             else:
-                self.generate_llms_txt(summaries, temp_output)
+                update_mode = "structure-preserving" if preserve_structure else "sorted"
+                print(
+                    f"Completed: {len(summaries)} documents summarized. Generating {update_mode} llms.txt..."
+                )
+
+                temp_output = os.path.join(os.path.dirname(self.output_dir), "llms.txt")
+
+                if preserve_structure:
+                    # Type narrow: for txt format, summaries are strings
+                    str_summaries = [s for s in summaries if isinstance(s, str)]
+                    self.generate_structured_llms_txt(str_summaries, temp_output, self.file_structure)
+                else:
+                    str_summaries = [s for s in summaries if isinstance(s, str)]
+                    self.generate_llms_txt(str_summaries, temp_output)
 
         return summaries
 
@@ -364,7 +449,8 @@ class Summarizer:
         print(f"{message_prefix} {output_file} with {len(sorted_entries)} unique summaries sorted by URL.")
         if duplicates_removed > 0:
             print(
-                f"Removed {duplicates_removed} duplicate entries (same URL with/without trailing slash or identical content)."
+                f"Removed {duplicates_removed} duplicate entries "
+                "(same URL with/without trailing slash or identical content)."
             )
         if blacklisted_count > 0:
             print(f"Excluded {blacklisted_count} blacklisted URL entries.")
@@ -454,3 +540,41 @@ class Summarizer:
                     print(f"  - {url}")
                 if len(not_updated) > 5:
                     print(f"  - ... and {len(not_updated) - 5} more")
+
+    def generate_llms_jsonl(self, results: List[Dict[str, Any]], output_file: str = "llms.jsonl") -> None:
+        """
+        Generate the final llms.jsonl file from all JSONL entries.
+
+        Each line is a JSON object with: url, content, summary, keywords
+
+        Args:
+            results: List of JSONL entries (dicts) from current run
+            output_file: File to save to
+        """
+        # Collect all entries - from results and from stored entries
+        all_entries = list(results) + [e for e in self.jsonl_entries if e not in results]
+
+        # Deduplicate by URL
+        seen_urls: set = set()
+        unique_entries: List[Dict[str, Any]] = []
+
+        for entry in all_entries:
+            url = entry.get("url", "").rstrip("/")
+            # Skip blacklisted URLs
+            if url in self.blacklisted_urls:
+                continue
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_entries.append(entry)
+
+        # Sort by URL
+        unique_entries.sort(key=lambda x: x.get("url", ""))
+
+        # Write JSONL output
+        with open(output_file, "w") as f:
+            for entry in unique_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        print(f"Generated {output_file} with {len(unique_entries)} entries.")
+        if len(all_entries) - len(unique_entries) > 0:
+            print(f"Removed {len(all_entries) - len(unique_entries)} duplicate entries.")
