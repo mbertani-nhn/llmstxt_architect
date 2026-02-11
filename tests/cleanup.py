@@ -16,10 +16,10 @@ def cleanup_test_dirs():
         "test_api",
         "test_uvx",
     ]
-    
+
     # Count of directories cleaned
     cleaned = 0
-    
+
     for dir_name in dirs_to_clean:
         dir_path = Path(dir_name)
         if dir_path.exists() and dir_path.is_dir():
@@ -29,7 +29,7 @@ def cleanup_test_dirs():
                 cleaned += 1
             except Exception as e:
                 print(f"Error cleaning up {dir_path}: {e}")
-    
+
     if cleaned > 0:
         print(f"\nSuccessfully cleaned up {cleaned} test directories")
     else:
