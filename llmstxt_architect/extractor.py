@@ -23,6 +23,14 @@ def bs4_extractor(html: str) -> str:
     # Target the main article content for LangGraph documentation
     main_content = soup.find("article", class_="md-content__inner")
 
+    # Get urls from application buttons, together with their title.
+    for button in soup.find_all("a", class_="Button_button__8o_Gx SkjemadetaljerButton"):
+        url = button.get("href")
+        title = button.get_text(strip=True)
+        if url and title:
+            # Append the URL and title to the content
+            main_content.append(f"\n\n[SOKNADSLINK: {title}]({url})\n\n")
+
     # If found, use that, otherwise fall back to the whole document
     content = main_content.get_text() if main_content else soup.text
 
