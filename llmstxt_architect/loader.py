@@ -79,7 +79,9 @@ async def load_urls(
     return docs
 
 
-async def load_urls_directly(urls: List[str], extractor: Callable[[str], str] = None) -> List[Document]:
+async def load_urls_directly(
+    urls: List[str], extractor: Callable[[str], str] = None
+) -> List[Document]:
     """
     Load URLs directly without recursion. More efficient for existing llms.txt files.
 

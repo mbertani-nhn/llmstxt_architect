@@ -208,7 +208,11 @@ def main() -> None:
 
     # Handle update-descriptions-only flag (requires existing-llms-file)
     if args.update_descriptions_only and not args.existing_llms_file:
-        print(color_text("Error: --update-descriptions-only requires --existing-llms-file", "red"))
+        print(
+            color_text(
+                "Error: --update-descriptions-only requires --existing-llms-file", "red"
+            )
+        )
         sys.exit(1)
 
     # Load URLs from file if specified
@@ -229,7 +233,9 @@ def main() -> None:
 
     # Print status message for clarity
     if args.existing_llms_file:
-        print(color_text(f"Using existing llms file: {args.existing_llms_file}", "blue"))
+        print(
+            color_text(f"Using existing llms file: {args.existing_llms_file}", "blue")
+        )
         if args.update_descriptions_only:
             print(color_text("Mode: Update descriptions only (preserving structure)", "blue"))
 

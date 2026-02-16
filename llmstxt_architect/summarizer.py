@@ -535,7 +535,9 @@ class Summarizer:
 
             not_updated = [url for url in original_urls if url not in url_to_summary]
             if not_updated:
-                print(f"Warning: {len(not_updated)} URLs from original file were not updated:")
+                print(
+                    f"Warning: {len(not_updated)} URLs from original file were not updated:"
+                )
                 for url in not_updated[:5]:  # Show first 5 only
                     print(f"  - {url}")
                 if len(not_updated) > 5:

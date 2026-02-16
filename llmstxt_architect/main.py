@@ -98,9 +98,15 @@ async def generate_llms_txt(
                 content = await fetch_llms_txt_from_url(existing_llms_file)
                 # Parse content directly without saving to file
                 file_lines = content.splitlines(True)  # Keep line endings
-                _, existing_file_structure = parse_existing_llms_file_content(file_lines)
+                _, existing_file_structure = parse_existing_llms_file_content(
+                    file_lines
+                )
             except Exception as e:
-                print(status_message(f"Error fetching remote llms.txt file: {str(e)}", "error"))
+                print(
+                    status_message(
+                        f"Error fetching remote llms.txt file: {str(e)}", "error"
+                    )
+                )
                 raise
         else:
             # For local file
@@ -112,7 +118,11 @@ async def generate_llms_txt(
     stats["urls_processed"] = len(docs)
 
     # Initialize summarizer
-    print(status_message(f"Initializing summarizer with {llm_name} via {llm_provider}...", "info"))
+    print(
+        status_message(
+            f"Initializing summarizer with {llm_name} via {llm_provider}...", "info"
+        )
+    )
     summarizer = Summarizer(
         llm_name=llm_name,
         llm_provider=llm_provider,
@@ -133,7 +143,9 @@ async def generate_llms_txt(
         summaries = await summarizer.summarize_all(docs)
         stats["summaries_generated"] = len(summaries)
     except Exception as e:
-        print(status_message(f"Summarization process was interrupted: {str(e)}", "error"))
+        print(
+            status_message(f"Summarization process was interrupted: {str(e)}", "error")
+        )
         summaries = []  # Use empty list if interrupted
         # For error recovery, only check txt-format summaries (strings)
         str_summaries = [s for s in summaries if isinstance(s, str)]
