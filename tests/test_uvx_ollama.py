@@ -48,9 +48,7 @@ def test_uvx_ollama():
         assert (project_dir / "llms.txt").exists(), "llms.txt was not created"
 
         # Check if the summaries directory was created
-        assert (project_dir / "summaries").exists(), (
-            "summaries directory was not created"
-        )
+        assert (project_dir / "summaries").exists(), "summaries directory was not created"
 
         # Check if the summarized_urls.json file was created
         assert (project_dir / "summaries" / "summarized_urls.json").exists(), (

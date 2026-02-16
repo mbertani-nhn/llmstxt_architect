@@ -2,13 +2,12 @@
 Core functionality for generating LLMs.txt files.
 """
 
-import asyncio
 import time
-from typing import Callable, Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from llmstxt_architect.extractor import bs4_extractor, default_extractor
+from llmstxt_architect.extractor import default_extractor
 from llmstxt_architect.loader import load_urls, parse_existing_llms_file
-from llmstxt_architect.styling import status_message, generate_summary_report
+from llmstxt_architect.styling import generate_summary_report, status_message
 from llmstxt_architect.summarizer import Summarizer
 
 
@@ -28,12 +27,15 @@ async def generate_llms_txt(
     project_dir: str = "llms_txt",
     output_dir: str = "summaries",
     output_file: str = "llms.txt",
+    output_format: str = "txt",
     blacklist_file: str = None,
     existing_llms_file: Optional[str] = None,
     update_descriptions_only: bool = False,
+    max_concurrent_crawls: int = 3,
+    max_concurrent_summaries: int = 5,
 ) -> None:
     """
-    Generate an llms.txt file from a list of URLs.
+    Generate an llms.txt or llms.jsonl file from a list of URLs.
 
     Args:
         urls: List of URLs to process
@@ -45,9 +47,12 @@ async def generate_llms_txt(
         project_dir: Main project directory to store all outputs
         output_dir: Directory within project_dir to save individual summaries
         output_file: File name for combined summaries (saved in project_dir)
+        output_format: Output format, either "txt" or "jsonl"
         blacklist_file: Path to a file containing blacklisted URLs to exclude (one per line)
         existing_llms_file: Path to an existing llms.txt file to extract URLs and structure from
         update_descriptions_only: If True, preserve the existing file structure and only update descriptions
+        max_concurrent_crawls: Maximum number of concurrent root URL crawls
+        max_concurrent_summaries: Maximum number of concurrent LLM summarization calls
     """
     # Start timing
     start_time = time.time()
@@ -109,7 +114,7 @@ async def generate_llms_txt(
 
     # Load all documents
     print(status_message("Loading and processing URLs...", "processing"))
-    docs = await load_urls(urls, max_depth, extractor, existing_llms_file)
+    docs = await load_urls(urls, max_depth, extractor, existing_llms_file, max_concurrent_crawls)
     stats["urls_processed"] = len(docs)
 
     # Initialize summarizer
@@ -125,6 +130,8 @@ async def generate_llms_txt(
         output_dir=str(summaries_path),
         blacklist_file=blacklist_file,
         existing_llms_file=existing_llms_file if update_descriptions_only else None,
+        max_concurrent_summaries=max_concurrent_summaries,
+        output_format=output_format,
     )
 
     # Run async post-initialization
@@ -140,28 +147,42 @@ async def generate_llms_txt(
             status_message(f"Summarization process was interrupted: {str(e)}", "error")
         )
         summaries = []  # Use empty list if interrupted
+        # For error recovery, only check txt-format summaries (strings)
+        str_summaries = [s for s in summaries if isinstance(s, str)]
         stats["failed_urls"] = [
             doc.metadata.get("source", "")
             for doc in docs
-            if doc.metadata.get("source", "")
-            not in [s.split("](")[1].split(")")[0] for s in summaries]
+            if doc.metadata.get("source", "") not in [s.split("](")[1].split(")")[0] for s in str_summaries]
         ]
     finally:
         # Always generate the final output file, even if interrupted
-        print(
-            status_message(
-                "Generating final llms.txt file from all available summaries...",
-                "processing",
+        if output_format == "jsonl":
+            print(
+                status_message(
+                    "Generating final llms.jsonl file from all available summaries...",
+                    "processing",
+                )
             )
-        )
-
-        # Call the appropriate method based on whether we're preserving structure
-        if update_descriptions_only and existing_file_structure:
-            summarizer.generate_structured_llms_txt(
-                summaries, str(output_file_path), existing_file_structure
-            )
+            # For JSONL format, extract dict entries from summaries
+            jsonl_entries = [s for s in summaries if isinstance(s, dict)]
+            summarizer.generate_llms_jsonl(jsonl_entries, str(output_file_path))
         else:
-            summarizer.generate_llms_txt(summaries, str(output_file_path))
+            print(
+                status_message(
+                    "Generating final llms.txt file from all available summaries...",
+                    "processing",
+                )
+            )
+            # For txt format, extract string summaries
+            txt_summaries = [s for s in summaries if isinstance(s, str)]
+
+            # Call the appropriate method based on whether we're preserving structure
+            if update_descriptions_only and existing_file_structure:
+                summarizer.generate_structured_llms_txt(
+                    txt_summaries, str(output_file_path), existing_file_structure
+                )
+            else:
+                summarizer.generate_llms_txt(txt_summaries, str(output_file_path))
 
         # Calculate total time
         stats["total_time"] = time.time() - start_time

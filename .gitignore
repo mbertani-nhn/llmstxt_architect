@@ -4,7 +4,10 @@ __pycache__/
 *$py.class
 *.so
 
+.DS_Store
 tmp/
+.nav/ 
+out-*/
 
 # Virtual environments
 .env/

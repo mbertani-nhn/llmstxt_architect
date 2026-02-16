@@ -10,8 +10,8 @@ import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from test_script_claude import test_script_claude
 from cleanup import cleanup_test_dirs
+from test_script_claude import test_script_claude
 
 
 async def run_all_tests():
@@ -101,6 +101,40 @@ async def run_all_tests():
     except subprocess.CalledProcessError as e:
         results["cli"] = False
         print("❌ Test 5 failed:")
+        print(f"STDOUT: {e.stdout}")
+        print(f"STDERR: {e.stderr}")
+
+    # Test 6: Async pipeline
+    print("\nRunning Test 6: Async pipeline...")
+    try:
+        result = subprocess.run(
+            ["python", os.path.join(current_dir, "test_async_pipeline.py")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        results["async_pipeline"] = True
+        print("✅ Test 6 passed!")
+    except subprocess.CalledProcessError as e:
+        results["async_pipeline"] = False
+        print("❌ Test 6 failed:")
+        print(f"STDOUT: {e.stdout}")
+        print(f"STDERR: {e.stderr}")
+
+    # Test 7: Temporal integration
+    print("\nRunning Test 7: Temporal integration...")
+    try:
+        result = subprocess.run(
+            ["python", os.path.join(current_dir, "test_temporal.py")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        results["temporal"] = True
+        print("✅ Test 7 passed!")
+    except subprocess.CalledProcessError as e:
+        results["temporal"] = False
+        print("❌ Test 7 failed:")
         print(f"STDOUT: {e.stdout}")
         print(f"STDERR: {e.stderr}")
 

@@ -5,7 +5,6 @@ Command-line interface for LLMsTxt Architect.
 import argparse
 import asyncio
 import sys
-from typing import List, Optional
 
 from llmstxt_architect.extractor import bs4_extractor, default_extractor
 from llmstxt_architect.main import generate_llms_txt
@@ -19,18 +18,24 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Create mutually exclusive group for URL input sources
-    url_group = parser.add_mutually_exclusive_group(required=True)
+    # Not required because --workflow-id can be used instead
+    url_group = parser.add_mutually_exclusive_group(required=False)
 
     url_group.add_argument("--urls", nargs="+", help="List of URLs to process")
+
+    url_group.add_argument(
+        "--urls-from-file",
+        help="Path to a file containing URLs to process (one per line)",
+    )
 
     url_group.add_argument(
         "--existing-llms-file",
         help="Path to an existing llms.txt file to extract URLs from and update",
     )
 
-    # Support legacy format for compatibility (--urls is no longer required when --existing-llms-file is present)
-    # This is a workaround for uvx which might be passing arguments differently
-    # Handle the case when args are manually specified on command line
+    # Support legacy format for compatibility
+    # --urls is no longer required when --existing-llms-file is present
+    # This is a workaround for uvx which might be passing args differently
 
     parser.add_argument(
         "--update-descriptions-only",
@@ -51,9 +56,7 @@ def parse_args() -> argparse.Namespace:
         help="LLM model name (default: claude-3-sonnet-20240229)",
     )
 
-    parser.add_argument(
-        "--llm-provider", default="anthropic", help="LLM provider (default: anthropic)"
-    )
+    parser.add_argument("--llm-provider", default="anthropic", help="LLM provider (default: anthropic)")
 
     parser.add_argument(
         "--project-dir",
@@ -69,8 +72,15 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--output-file",
-        default="llms.txt",
-        help="Output file name for combined summaries (default: llms.txt)",
+        default=None,
+        help="Output file name for combined summaries (default: llms.txt or llms.jsonl based on format)",
+    )
+
+    parser.add_argument(
+        "--output-format",
+        default="txt",
+        choices=["txt", "jsonl"],
+        help="Output format: 'txt' for llms.txt, 'jsonl' for structured JSON Lines (default: txt)",
     )
 
     parser.add_argument(
@@ -95,6 +105,41 @@ def parse_args() -> argparse.Namespace:
         help="Content extractor to use (default: markdownify, bs4: BeautifulSoup)",
     )
 
+    parser.add_argument(
+        "--max-concurrent-crawls",
+        type=int,
+        default=3,
+        help="Maximum number of concurrent root URL crawls (default: 3)",
+    )
+
+    parser.add_argument(
+        "--max-concurrent-summaries",
+        type=int,
+        default=5,
+        help="Maximum number of concurrent LLM summarization calls (default: 5)",
+    )
+
+    parser.add_argument(
+        "--orchestrator",
+        default="local",
+        choices=["local", "temporal"],
+        help=(
+            "Orchestrator to use: 'local' for async pipeline, "
+            "'temporal' for Temporal workflows (default: local)"
+        ),
+    )
+
+    parser.add_argument(
+        "--temporal-address",
+        default="localhost:7233",
+        help="Temporal server address (default: localhost:7233)",
+    )
+
+    parser.add_argument(
+        "--workflow-id",
+        help="Reconnect to an existing Temporal workflow by ID (e.g. llmstxt-db5b06ab)",
+    )
+
     return parser.parse_args()
 
 
@@ -102,9 +147,7 @@ def show_splash() -> None:
     """Display the splash screen."""
     print(
         color_text(
-            draw_box(
-                "LLMsTxt Architect - Generate LLMs.txt from web content", "green", 2
-            ),
+            draw_box("LLMsTxt Architect - Generate LLMs.txt from web content", "green", 2),
             "green",
         )
     )
@@ -122,6 +165,47 @@ def main() -> None:
     extractor_map = {"default": default_extractor, "bs4": bs4_extractor}
     extractor_func = extractor_map[args.extractor]
 
+    # Handle --workflow-id: reconnect to existing Temporal workflow
+    if args.workflow_id:
+        if args.orchestrator != "temporal":
+            print(color_text("Error: --workflow-id requires --orchestrator temporal", "red"))
+            sys.exit(1)
+        try:
+            from llmstxt_architect.temporal.client import get_workflow_result
+        except ImportError:
+            print(
+                color_text(
+                    "Error: Temporal dependencies not installed. "
+                    "Install with: pip install 'llmstxt_architect[temporal]'",
+                    "red",
+                )
+            )
+            sys.exit(1)
+
+        try:
+            asyncio.run(
+                get_workflow_result(
+                    workflow_id=args.workflow_id,
+                    temporal_address=args.temporal_address,
+                )
+            )
+        except KeyboardInterrupt:
+            print(color_text("\nDisconnected. The workflow continues running on the server.", "yellow"))
+            sys.exit(0)
+        except Exception as e:
+            print(color_text(f"Error: {str(e)}", "red"))
+            sys.exit(1)
+        return
+
+    # Validate that a URL source is provided when not using --workflow-id
+    if not args.urls and not args.urls_from_file and not args.existing_llms_file:
+        err_msg = (
+            "Error: --urls, --urls-from-file, or --existing-llms-file "
+            "is required (or use --workflow-id to reconnect)"
+        )
+        print(color_text(err_msg, "red"))
+        sys.exit(1)
+
     # Handle update-descriptions-only flag (requires existing-llms-file)
     if args.update_descriptions_only and not args.existing_llms_file:
         print(
@@ -131,8 +215,21 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # If using existing llms file but no URLs specified, will extract from file
-    urls = args.urls or []
+    # Load URLs from file if specified
+    if args.urls_from_file:
+        try:
+            with open(args.urls_from_file, "r") as f:
+                urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            print(color_text(f"Loaded {len(urls)} URLs from {args.urls_from_file}", "blue"))
+        except FileNotFoundError:
+            print(color_text(f"Error: File not found: {args.urls_from_file}", "red"))
+            sys.exit(1)
+    else:
+        urls = args.urls or []
+
+    # Set default output file based on format if not explicitly provided
+    if args.output_file is None:
+        args.output_file = "llms.jsonl" if args.output_format == "jsonl" else "llms.txt"
 
     # Print status message for clarity
     if args.existing_llms_file:
@@ -140,29 +237,64 @@ def main() -> None:
             color_text(f"Using existing llms file: {args.existing_llms_file}", "blue")
         )
         if args.update_descriptions_only:
-            print(
-                color_text(
-                    "Mode: Update descriptions only (preserving structure)", "blue"
-                )
-            )
+            print(color_text("Mode: Update descriptions only (preserving structure)", "blue"))
+
+    if args.output_format == "jsonl":
+        print(color_text(f"Output format: JSONL (structured JSON Lines -> {args.output_file})", "blue"))
 
     try:
-        asyncio.run(
-            generate_llms_txt(
-                urls=urls,
-                max_depth=args.max_depth,
-                llm_name=args.llm_name,
-                llm_provider=args.llm_provider,
-                project_dir=args.project_dir,
-                output_dir=args.output_dir,
-                output_file=args.output_file,
-                summary_prompt=args.summary_prompt,
-                blacklist_file=args.blacklist_file,
-                extractor=extractor_func,
-                existing_llms_file=args.existing_llms_file,
-                update_descriptions_only=args.update_descriptions_only,
+        if args.orchestrator == "temporal":
+            try:
+                from llmstxt_architect.temporal.client import run_temporal_workflow
+            except ImportError:
+                print(
+                    color_text(
+                        "Error: Temporal dependencies not installed. "
+                        "Install with: pip install 'llmstxt_architect[temporal]'",
+                        "red",
+                    )
+                )
+                sys.exit(1)
+
+            asyncio.run(
+                run_temporal_workflow(
+                    urls=urls,
+                    max_depth=args.max_depth,
+                    llm_name=args.llm_name,
+                    llm_provider=args.llm_provider,
+                    project_dir=args.project_dir,
+                    output_dir=args.output_dir,
+                    output_file=args.output_file,
+                    output_format=args.output_format,
+                    summary_prompt=args.summary_prompt,
+                    blacklist_file=args.blacklist_file,
+                    extractor_name=args.extractor,
+                    existing_llms_file=args.existing_llms_file,
+                    update_descriptions_only=args.update_descriptions_only,
+                    max_concurrent_summaries=args.max_concurrent_summaries,
+                    temporal_address=args.temporal_address,
+                )
             )
-        )
+        else:
+            asyncio.run(
+                generate_llms_txt(
+                    urls=urls,
+                    max_depth=args.max_depth,
+                    llm_name=args.llm_name,
+                    llm_provider=args.llm_provider,
+                    project_dir=args.project_dir,
+                    output_dir=args.output_dir,
+                    output_file=args.output_file,
+                    output_format=args.output_format,
+                    summary_prompt=args.summary_prompt,
+                    blacklist_file=args.blacklist_file,
+                    extractor=extractor_func,
+                    existing_llms_file=args.existing_llms_file,
+                    update_descriptions_only=args.update_descriptions_only,
+                    max_concurrent_crawls=args.max_concurrent_crawls,
+                    max_concurrent_summaries=args.max_concurrent_summaries,
+                )
+            )
     except KeyboardInterrupt:
         print(color_text("\nOperation cancelled by user.", "yellow"))
         sys.exit(1)

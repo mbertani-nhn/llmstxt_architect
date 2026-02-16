@@ -36,11 +36,17 @@ def default_extractor(html: str) -> str:
     """
     Extract content from HTML and convert to markdown.
 
+    Falls back to plain text extraction if markdownify hits a recursion
+    limit on deeply nested HTML (common on government/CMS sites).
+
     Args:
         html: The HTML content to extract from
 
     Returns:
         Markdown converted content
     """
-    result = markdownify(html)
-    return str(result)
+    try:
+        result = markdownify(html)
+        return str(result)
+    except RecursionError:
+        return bs4_extractor(html)
